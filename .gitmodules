@@ -1,0 +1,6 @@
+[submodule "lib/ESP32_WiFi_Injection_Sinffer"]
+	path = lib/ESP32_WiFi_Injection_Sinffer
+	url = https://github.com/sysytwl/ESP32_WiFi_Injection_Sinffer.git
+[submodule "lib/rs_fec"]
+	path = lib/rs_fec
+	url = https://github.com/sysytwl/rs_fec.git
