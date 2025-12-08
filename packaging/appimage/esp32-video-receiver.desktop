@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=ESP32 Video Receiver
+Comment=接收 ESP32 发送的 WiFi 视频流（含 FEC 纠错、GPU 解码、OSD 叠加）
+Exec=esp32-video-receiver %f  # %f 支持命令行参数传递
+Icon=esp32-video-receiver     # 图标文件名（与内置图标一致）
+Terminal=true                 # 必须显示终端（需输入网卡接口/查看日志）
+Type=Application
+Categories=Network;Video;Development;  # 桌面分类
+Keywords=ESP32;WiFi;FEC;JPEG;MAVLink;

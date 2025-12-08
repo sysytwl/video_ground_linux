@@ -1,0 +1,28 @@
+#!/bin/bash
+HERE="$(dirname "$(readlink -f "${0}")")"
+
+# 导出库路径
+export LD_LIBRARY_PATH="${HERE}/usr/lib:${LD_LIBRARY_PATH}"
+
+# 架构特定配置
+if [ "$(uname -m)" = "aarch64" ]; then
+    # ARM64特定优化 - 树莓派GPU加速
+    export VC_LIBRARY_PATH="${HERE}/usr/lib"
+    export OPENCV_OPENCL_DEVICE=:0
+    echo "检测到ARM64架构，启用树莓派GPU加速"
+else
+    # x86_64配置
+    export OPENCV_OPENCL_DEVICE=:0
+fi
+
+# OpenCV配置
+export OPENCV_PLUGIN_PATH="${HERE}/usr/lib/opencv4"
+
+# 权限检查
+if [ "$(id -u)" -ne 0 ]; then
+    echo "⚠️ 需要root权限以进行WiFi包捕获,尝试用sudo重启..."
+    exec sudo -E "$0" "$@"
+fi
+
+# 启动主程序
+exec "${HERE}/usr/bin/esp32_video_rx" "$@"
