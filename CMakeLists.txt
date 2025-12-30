@@ -1,36 +1,40 @@
 cmake_minimum_required(VERSION 3.10)
-project(esp32_video_rx)
+project(wifi_sniffer VERSION 1.0.0 LANGUAGES CXX)
 
-# 检测架构
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
-    set(ARCH "arm64")
-elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64")
-    set(ARCH "x86_64")
-else()
-    message(FATAL_ERROR "不支持的架构: ${CMAKE_SYSTEM_PROCESSOR}")
-endif()
-
-message(STATUS "检测到架构: ${ARCH}")
-
-set(CMAKE_CXX_STANDARD 17)
+# Set C++ standard
+set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
-# 优化选项
-if(CMAKE_BUILD_TYPE STREQUAL "Release")
-    if(ARCH STREQUAL "arm64")
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=armv8-a+crypto -mtune=cortex-a53")
+# Find required packages
+find_package(Threads REQUIRED)
+find_package(PkgConfig REQUIRED)
+find_package(OpenCV REQUIRED) # Find OpenCV
+include_directories(${OpenCV_INCLUDE_DIRS})
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
+    libavformat
+    libavcodec
+    libavutil
+    libavfilter
+    libswscale
+)
+find_package(PCAP QUIET)
+if(NOT Pcap_FOUND)
+    # Option 2: Manual search if the module fails
+    message(STATUS "Module not found, searching for libraries and headers...")
+    find_library(PCAP_LIBRARY NAMES pcap PATH /usr/lib/aarch64-linux-gnu)
+    find_path(PCAP_INCLUDE_DIR NAMES pcap.h)
+
+    if(PCAP_LIBRARY AND PCAP_INCLUDE_DIR)
+        message(STATUS "Found libpcap via manual search.")
+        set(PCAP_FOUND TRUE)
+        set(PCAP_LIBRARIES ${PCAP_LIBRARY})
+        set(PCAP_INCLUDE_DIRS ${PCAP_INCLUDE_DIR})
     else()
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=native")
+        message(FATAL_ERROR "libpcap not found. Please check your installation.")
     endif()
 endif()
-
-# 包含目录
-include_directories(
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-)
-
-# 源文件
-file(GLOB SRC_FILES src/*.cpp)
 
 # Libs
 set(SUB_DIRECTORIES
@@ -48,28 +52,24 @@ foreach(SUB_DIR ${SUB_DIRECTORIES})
     endif()
 endforeach()
 
+# Include directories
+include_directories(
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/lib/rs_fec/include
+    ${CMAKE_SOURCE_DIR}/lib/ESP32_WiFi_Injection_Sinffer/include
+)
 
+# Add executable
+file(GLOB SRC_FILES src/*.cpp)
+add_executable(${PROJECT_NAME} ${SRC_FILES})
 
-# 查找OpenCV
-find_package(OpenCV REQUIRED COMPONENTS core highgui imgproc)
-
-# 对于ARM架构，检查是否有GPU加速库
-if(ARCH STREQUAL "arm64")
-    find_library(BCM_HOST NAMES bcm_host)
-    if(BCM_HOST)
-        message(STATUS "找到树莓派GPU库: ${BCM_HOST}")
-        set(EXTRA_LIBS ${EXTRA_LIBS} ${BCM_HOST})
-    endif()
-endif()
-
-# 生成可执行文件
-add_executable(esp32_video_rx ${SRC_FILES})
-
-# 链接库
-target_link_libraries(esp32_video_rx
-    ${OpenCV_LIBS}
+# Link libraries
+list(REMOVE_ITEM OpenCV_LIBS opencv_viz opencv_hdf)
+target_link_libraries(${PROJECT_NAME}
     ESP32_WiFi_Injection_Sinffer
     rs_fec
-    ${EXTRA_LIBS}
-    pthread
+    ${PCAP_LIBRARIES}
+    Threads::Threads
+    ${OpenCV_LIBS}
+    PkgConfig::FFMPEG
 )

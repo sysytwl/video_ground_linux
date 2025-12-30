@@ -1,0 +1,10 @@
+aircrack-ng
+
+---- DEV ----
+libpcap-dev libpcap
+libopencv-dev opencv
+glibc
+linux-api-headers
+base-devel
+ffmpeg
+ vtk   libvtk9-dev
