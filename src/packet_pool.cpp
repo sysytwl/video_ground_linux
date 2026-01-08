@@ -6,6 +6,36 @@
 #include <time.h>
 #include "fec.h"
 
+#include <stdarg.h>
+// Global or static variable
+static FILE *log_file = NULL;
+
+// Initialize once
+void init_logger() {
+    log_file = fopen("log.txt", "a");
+}
+
+// Log function
+void log_message(const char* format, ...) {
+    if (!log_file) return;
+    
+    va_list args;
+    va_start(args, format);
+    vfprintf(log_file, format, args);
+    fflush(log_file);  // Ensure immediate write
+    va_end(args);
+}
+
+// Cleanup
+void close_logger() {
+    if (log_file) {
+        fclose(log_file);
+        log_file = NULL;
+    }
+}
+
+
+
 thread_local ZFE_FEC fec_decoder;
 thread_local ZFE_FEC::fec_t* fec_type = nullptr;
 
@@ -99,6 +129,7 @@ void PacketPool::process_active_frame() {
 
         fec_decoder.fec_decode(fec_type, in_packets, out_packets, block_indices, active_frame_->data_size);
 
+        //auto during = std::chrono::steady_clock::now() - active_frame_->creation_time;
 
         // Output all K packets
         for (int i = 0; i < FEC_K; i++) {
