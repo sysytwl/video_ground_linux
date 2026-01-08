@@ -39,8 +39,8 @@ void close_logger() {
 thread_local ZFE_FEC fec_decoder;
 thread_local ZFE_FEC::fec_t* fec_type = nullptr;
 
-PacketPool::PacketPool(size_t max_buffer_size) 
-    : max_packet_buffer_size_(max_buffer_size),
+PacketPool::PacketPool() 
+    : max_packet_buffer_size_(1000),
       running_(false),
       total_packets_(0),
       packets_recovered_(0),
@@ -49,8 +49,7 @@ PacketPool::PacketPool(size_t max_buffer_size)
       frames_decoded_(0),
       frames_discarded_(0),
       callback_(nullptr),
-      callback_user_data_(nullptr),
-      active_frame_(std::make_unique<FECFrame>()) {
+      callback_user_data_(nullptr) {
     start_time = time(NULL);
 }
 
@@ -60,21 +59,23 @@ PacketPool::~PacketPool() {
 
 bool PacketPool::add_packet(uint32_t frame_index, uint8_t part_index, const uint8_t* data, size_t data_size, bool vsync) {
     std::unique_lock<std::mutex> lock(pool_mutex_);
-    
-    // Wait if buffer is full
-    buffer_space_available_cv_.wait(lock, [this]() {
-        return packet_buffer_.size() < max_packet_buffer_size_ || !running_;
-    });
-    
-    if (!running_) return false;
-    
+
+    // return if buffer is full
+    if (packet_buffer_.size() > max_packet_buffer_size_ || !running_)
+        return  false;
+
     // Create packet and add to buffer
-    auto packet = std::make_shared<ReceivedPacket>(
-        frame_index, part_index, data, data_size, vsync);
-    
+    ReceivedPacket packet;
+    packet.data.assign(data, data+data_size);
+    packet.part_index = part_index;
+    packet.frame_index = frame_index;
+    packet.data_size = data_size;
+
     packet_buffer_.push(packet);
     packets_received_++;
-    
+
+    //printf("add pack: %d   ", packet_buffer_.size());
+
     // Notify decoder thread
     packet_available_cv_.notify_one();
     return true;
@@ -83,16 +84,13 @@ bool PacketPool::add_packet(uint32_t frame_index, uint8_t part_index, const uint
 void PacketPool::set_buffer_size(size_t new_size) {
     std::lock_guard<std::mutex> lock(pool_mutex_);
     max_packet_buffer_size_ = new_size;
-    buffer_space_available_cv_.notify_all();  // Wake up waiting threads
 }
 
 void PacketPool::process_active_frame() {
-    if (!active_frame_ || active_frame_->data_size == 0) {
-        return;
-    }
 
     // Check if we can decode
-    if (active_frame_->can_decode()) {
+    if (active_frame_.can_decode()) {
+        //log_message("    true \n");
         // Initialize FEC if needed
         if (fec_type == nullptr) {
             fec_decoder.init_fec();
@@ -107,34 +105,46 @@ void PacketPool::process_active_frame() {
         int fec_pack_counter = FEC_K;
 
         for (int i = 0; i < FEC_K; i++) {
-            if (active_frame_->block_status[i]) {
-                in_packets[i] = active_frame_->block_data[i].get();
+            if (active_frame_.block_status[i]) {
+                in_packets[i] = active_frame_.block_data[i];
                 block_indices[i] = i;
             } else {
-                while(!active_frame_->block_status[fec_pack_counter]){
+                while(!active_frame_.block_status[fec_pack_counter]){
                     fec_pack_counter++;
-                    if(fec_pack_counter>=FEC_N){
-                        printf("unknow fec overflow: %d \n", fec_pack_counter);
-                        fec_pack_counter=FEC_N-1;
-                        break;
-                    }
                 }
-                in_packets[i] = active_frame_->block_data[fec_pack_counter].get();
+                in_packets[i] = active_frame_.block_data[fec_pack_counter];
                 block_indices[i] = fec_pack_counter;
-                out_packets[i] = active_frame_->block_data[i].get();
+                out_packets[i] = active_frame_.block_data[i];
                 fec_pack_counter++;
                 packets_recovered_++;
             }
         }
+        
+        fec_decoder.fec_decode(
+            fec_type, 
+            in_packets, 
+            out_packets, 
+            block_indices, 
+            active_frame_.data_size
+        );
 
-        fec_decoder.fec_decode(fec_type, in_packets, out_packets, block_indices, active_frame_->data_size);
-
-        //auto during = std::chrono::steady_clock::now() - active_frame_->creation_time;
+        //printf("FEC latency: %d   ", active_frame_.get_elapsed_time());
 
         // Output all K packets
         for (int i = 0; i < FEC_K; i++) {
-            callback_(active_frame_->block_data[i].get(), active_frame_->data_size, active_frame_->vsync_flags[i]);
+            callback_(
+                active_frame_.block_data[i], 
+                active_frame_.data_size, 
+                active_frame_.frame_index == 1 && i==0
+            );
+
+            // for (int j=0; j< active_frame_.data_size; j++){
+            //     log_message(" %X ", active_frame_.block_data[i][j]);
+            // }
+            // log_message("\n");
         }
+
+        //printf("viedo callback latency: %d \n", active_frame_.get_elapsed_time());
         
         frames_decoded_++;
         total_packets_ += FEC_K;
@@ -146,31 +156,31 @@ void PacketPool::process_active_frame() {
 
     }
     // Check if frame is stale and should be discarded
-    else if (active_frame_->is_stale(frame_timeout_)) {
+    else if (active_frame_.is_stale(frame_timeout_)) {
+        log_message("    timeout\n");
         flush_stale_frame();
     } else {
-        printf("incomplete pack, not able to decode. \n");
+        log_message("    false \n");
+        //printf("incomplete pack, not able to decode. \n");
         flush_stale_frame();
     }
 }
 
 void PacketPool::flush_stale_frame() {
-    if (!active_frame_) return;
-    
     // Output any available packets before discarding
     int available_packets = 0;
     for (int i = 0; i < FEC_K; i++) {
-        if (active_frame_->block_status[i]) {
-            callback_(active_frame_->block_data[i].get(), active_frame_->data_size, active_frame_->vsync_flags[i]);
+        if (active_frame_.block_status[i]) {
+            callback_(
+                active_frame_.block_data[i], 
+                active_frame_.data_size, 
+                active_frame_.frame_index==1 && i==0);
             available_packets++;
         }
     }
-    
+
     packets_wasted_ += available_packets;
     frames_discarded_++;
-    
-    // Reset for next frame
-    active_frame_->reset(0);
 }
 
 void PacketPool::decoder_thread_func(int id) {
@@ -180,71 +190,65 @@ void PacketPool::decoder_thread_func(int id) {
     fec_decoder.init_fec();
     fec_type = fec_decoder.fec_new(FEC_K, FEC_N);
     
-    while (running_) {
-        std::shared_ptr<ReceivedPacket> packet;
+    //packet
+    ReceivedPacket packet;
 
-        {
+    while (running_) {
+        {        
             std::unique_lock<std::mutex> lock(pool_mutex_);
 
             // Wait for packet or shutdown
-            packet_available_cv_.wait(lock, [this]() {
+            packet_available_cv_.wait(lock,[this]() {
                 return !running_ || !packet_buffer_.empty();
             });
 
             if (!running_) break;
 
-            if (packet_buffer_.empty()) {
-                continue;
-            }
+            //printf("Pack pool: %d latency %d   ", packet_buffer_.size(), active_frame_.get_elapsed_time());
 
-            // Get next packet
-            packet = packet_buffer_.front();
+            // Fast move operation - O(1)
+            packet = std::move(packet_buffer_.front());
             packet_buffer_.pop();
-
-            // Notify that buffer has space
-            buffer_space_available_cv_.notify_one();
         }
-        
-        // Process the packet
-        std::lock_guard<std::mutex> lock(pool_mutex_);
 
-        //printf("frame: %d, part: %d \n", packet->frame_index, packet->part_index);
         // Check if this is for the current active frame
-        if (active_frame_->frame_index == 0 || 
-            active_frame_->frame_index != packet->frame_index) {
-            
-            // Flush previous frame if it exists
-            if (active_frame_->frame_index != 0) {
+        if (active_frame_.frame_index == 0 || 
+            active_frame_.frame_index != packet.frame_index) {
+
+            //process last frame
+            if (active_frame_.frame_index != 0) {
                 process_active_frame();
             }
-            
+
             // Start new frame
-            active_frame_->reset(packet->frame_index);
-            active_frame_->data_size = packet->data_size;
+            //log_message("frame: %d  ",packet.frame_index);
+            active_frame_.reset(packet.frame_index);
+            active_frame_.data_size = packet.data_size;
         }
-        
+
         // Validate packet
-        if (packet->part_index >= FEC_N) {
+        if (packet.part_index >= FEC_N) {
             packets_wasted_++;
-            printf("Invalid part index: %d\n", packet->part_index);
+            printf("Invalid part index: %d\n", packet.part_index);
             continue;
         }
-        
-        if (packet->data_size != active_frame_->data_size) {
+
+        if (packet.data_size != active_frame_.data_size) {
             packets_wasted_++;
             printf("Size mismatch for frame %u: expected %zu, got %zu\n",
-                   packet->frame_index, active_frame_->data_size, packet->data_size);
+                   packet.frame_index, active_frame_.data_size, packet.data_size);
             continue;
         }
-        
+
         // Store packet in active frame
-        std::memcpy(active_frame_->block_data[packet->part_index].get(),
-                   packet->data.get(), packet->data_size);
-        active_frame_->block_status[packet->part_index] = true;
-        active_frame_->vsync_flags[packet->part_index] = packet->vsync;
-        
-        // Try to decode if we have enough packets
-        //process_active_frame();
+        memcpy(
+            active_frame_.block_data[packet.part_index],
+            packet.data.data(),
+            packet.data_size
+        );
+        active_frame_.block_status[packet.part_index] = true;
+
+        //log_message(" part: %d    ", packet.part_index);
     }
     
     // Cleanup thread-local FEC
@@ -264,6 +268,7 @@ void PacketPool::start_processing(int num_threads,
     running_ = true;
     callback_ = callback;
     callback_user_data_ = user_data;
+    active_frame_.init(FEC_N);
     
     // Start decoder threads
     for (int i = 0; i < num_threads; i++) {
@@ -271,6 +276,9 @@ void PacketPool::start_processing(int num_threads,
     }
     
     start_time = time(NULL);
+
+    init_logger();
+
     printf("Started packet processing with %d threads\n", num_threads);
 }
 
@@ -283,7 +291,6 @@ void PacketPool::stop_processing() {
     {
         std::lock_guard<std::mutex> lock(pool_mutex_);
         packet_available_cv_.notify_all();
-        buffer_space_available_cv_.notify_all();
     }
     
     // Wait for decoder threads
@@ -300,8 +307,12 @@ void PacketPool::stop_processing() {
         while (!packet_buffer_.empty()) {
             packet_buffer_.pop();
         }
+
+        active_frame_.deinit();
     }
-    
+
+    close_logger();
+
     // Print statistics
     double elapsed_time = difftime(time(NULL), start_time);
     printf("\n=== Packet Pool Statistics ===\n");

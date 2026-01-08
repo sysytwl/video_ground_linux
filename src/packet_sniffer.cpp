@@ -9,7 +9,7 @@
 #include <algorithm>
 #include <iomanip>
 
-#define DEBUG 0
+
 
 PacketSniffer::PacketSniffer() 
     : handle_(nullptr), filter_by_mac_(false), link_type_(0), running_(false) {
@@ -39,12 +39,34 @@ bool PacketSniffer::initialize(std::string interface,uint8_t cases,std::string f
 bool PacketSniffer::initialize_pcap(std::string interface) {
     char errbuf[PCAP_ERRBUF_SIZE];
     
-    handle_ = pcap_open_live(interface.c_str(), 
-                            BUFSIZ, 
-                            1,      // Promiscuous mode
-                            1000,   // Read timeout in milliseconds
-                            errbuf);
-    
+    // Method 1: Modern API with immediate mode
+    handle_ = pcap_create(interface.c_str(), errbuf);
+    if (handle_) {
+        // WiFi works better with small buffer and short timeout
+        pcap_set_buffer_size(handle_, 128 * 1024);  // 128KB
+        pcap_set_timeout(handle_, 10);  // 10ms for WiFi
+        
+        // Try immediate mode first
+        if (pcap_set_immediate_mode(handle_, 1) == 0) {
+            printf("Immediate mode enabled\n");
+        } else {
+            printf("Immediate mode not available, using 10ms timeout\n");
+        }
+        
+        pcap_set_promisc(handle_, 1);
+        pcap_set_snaplen(handle_, BUFSIZ);
+        
+        if (pcap_activate(handle_) != 0) {
+            pcap_close(handle_);
+
+            // Method 2: Fallback to traditional API
+            printf("Using traditional pcap_open_live with 10ms timeout\n");
+            handle_ = pcap_open_live(interface.c_str(), BUFSIZ, 1, 10, errbuf);
+        }
+        
+    }
+
+
     if (handle_ == nullptr) {
         std::cerr << "Could not open device " << interface << ": " << errbuf << std::endl;
         std::cerr << "\nMake sure:" << std::endl;
@@ -125,6 +147,8 @@ bool PacketSniffer::setup_filter(uint8_t cases,std::string filter_exp) {
 }
 
 void PacketSniffer::packet_handler(const struct pcap_pkthdr* pkthdr, const u_char* packet) {
+    //clock_t start = clock();
+
     PacketInfo info;
     info.header = *pkthdr;
 
@@ -181,18 +205,19 @@ void PacketSniffer::packet_handler(const struct pcap_pkthdr* pkthdr, const u_cha
     }
 
     // Log packet info if in debug mode
-    if (DEBUG){
-        std::cout << "WiFi Packet - ";
-        std::cout << WiFiPacket::get_frame_type_string(info.frame_type, info.frame_subtype);
-        std::cout << " Src: " << info.src_mac;
-        std::cout << " Dst: " << info.dst_mac;
-        std::cout << " BSSID: " << info.bssid_mac;
-        std::cout << " Size: " << pkthdr->len << " bytes";
-        std::cout << " Signal: " << info.radiotapinfo.signal_dbm << "dbm";
-        std::cout << " Noise: " << info.radiotapinfo.noise_dbm << "dbm";
-        std::cout << " Channel: " << info.radiotapinfo.channel_freq << "Hz";
-        std::cout << " DataRate: " << info.radiotapinfo.data_rate << "Mbps" << std::endl;
-    }
+    // std::cout << "WiFi Packet - ";
+    // std::cout << WiFiPacket::get_frame_type_string(info.frame_type, info.frame_subtype);
+    // std::cout << " Src: " << info.src_mac;
+    // std::cout << " Dst: " << info.dst_mac;
+    // std::cout << " BSSID: " << info.bssid_mac;
+    //std::cout << " Size: " << pkthdr->len<< " bytes";
+    // std::cout << " Signal: " << info.radiotapinfo.signal_dbm << "dbm";
+    // std::cout << " Noise: " << info.radiotapinfo.noise_dbm << "dbm";
+    // std::cout << " Channel: " << info.radiotapinfo.channel_freq << "Hz";
+    // std::cout << " DataRate: " << info.radiotapinfo.data_rate << "Mbps" << std::endl;
+
+    //clock_t end = clock();
+    //printf("Callback took: %ld us  \n ", (end-start)*1000000/CLOCKS_PER_SEC);
 }
 
 void PacketSniffer::start_capture(int packet_count) {
@@ -205,6 +230,7 @@ void PacketSniffer::start_capture(int packet_count) {
     running_ = true;
     
     // Start capture loop (block thread)
+    //pcap_set_buffer_size(handle_, 64 * 1024 * 1024); // 64MB
     int result = pcap_loop(handle_, packet_count,PacketSniffer::pcap_callback, (u_char*)this);
     
     if (result == -1) {

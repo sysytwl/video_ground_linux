@@ -21,49 +21,30 @@ typedef void (*PacketCallback)(const uint8_t* data, size_t size, bool vsync);
 class PacketPool {
 private:
     struct FECFrame {
-        std::vector<std::unique_ptr<uint8_t[]>> block_data;
-        std::vector<bool> block_status;
-        std::vector<bool> vsync_flags;
+        uint8_t **block_data;
+        bool *block_status;
         size_t data_size;
-        uint32_t frame_index;
-        std::atomic<bool> is_decoded;
+        uint32_t frame_index=0;
         std::chrono::steady_clock::time_point creation_time;
-        
-        FECFrame() : data_size(0), frame_index(0), is_decoded(false) {
-            block_data.resize(FEC_N);
-            block_status.resize(FEC_N, false);
-            vsync_flags.resize(FEC_N, false);
-            
-            for (int i = 0; i < FEC_N; i++) {
-                block_data[i] = std::make_unique<uint8_t[]>(1500);
-            }
-        }
-        
+        uint8_t n_;
+
         // Check if we have enough parts for decoding
         bool can_decode() const {
             int count = 0;
-            for (int i = 0; i < FEC_N; i++) {
+            for (int i = 0; i < n_; i++) {
                 if (block_status[i]) count++;
             }
             return count >= FEC_K;
         }
         
-        // Get available packets count
-        int available_packets() const {
-            int count = 0;
-            for (bool status : block_status) {
-                if (status) count++;
-            }
-            return count;
-        }
-        
         // Reset frame for reuse
         void reset(uint32_t new_frame_index) {
             frame_index = new_frame_index;
-            data_size = 0;
-            is_decoded = false;
-            std::fill(block_status.begin(), block_status.end(), false);
-            std::fill(vsync_flags.begin(), vsync_flags.end(), false);
+
+            for(int i=0; i<n_; i++){
+                block_status[i] = false;
+            }
+
             creation_time = std::chrono::steady_clock::now();
         }
         
@@ -72,30 +53,46 @@ private:
             auto now = std::chrono::steady_clock::now();
             return (now - creation_time) > timeout;
         }
+
+        std::chrono::milliseconds get_elapsed_time() const {
+            auto now = std::chrono::steady_clock::now();
+            return std::chrono::duration_cast<std::chrono::milliseconds>(now - creation_time);
+        }
+
+        void init(int n){
+            n_ = n;
+
+            block_status = new bool [n];
+
+            block_data = new uint8_t* [n];
+            for(int i=0; i<n; i++){
+                block_data[i] = new uint8_t [1500];
+            }
+        }
+
+        void deinit(){
+            delete [] block_status;
+
+            for(int i=0; i<n_; i++){
+                delete [] block_data[i];
+            }
+            delete [] block_data;
+        }
     };
-    
+    FECFrame active_frame_;
+
     struct ReceivedPacket {
         uint32_t frame_index;
         uint8_t part_index;
-        std::unique_ptr<uint8_t[]> data;
+        std::vector<uint8_t> data;
         size_t data_size;
-        bool vsync;
-        
-        ReceivedPacket(uint32_t frame_idx, uint8_t part_idx, 
-                      const uint8_t* src_data, size_t src_size, bool vsync_flag)
-            : frame_index(frame_idx), part_index(part_idx), 
-              data(std::make_unique<uint8_t[]>(src_size)),
-              data_size(src_size), vsync(vsync_flag) {
-            memcpy(data.get(), src_data, src_size);
-        }
     };
 
     // Flexible packet buffer
-    std::queue<std::shared_ptr<ReceivedPacket>> packet_buffer_;
-    size_t max_packet_buffer_size_ = 10000;  // Configurable buffer size
+    std::queue<ReceivedPacket> packet_buffer_;
+    size_t max_packet_buffer_size_ = 1000;  // Configurable buffer size
     
-    // Single active FEC frame
-    std::unique_ptr<FECFrame> active_frame_;
+
     
     // Thread management
     std::vector<std::thread> decoding_threads_;
@@ -104,7 +101,6 @@ private:
     // Synchronization
     std::mutex pool_mutex_;
     std::condition_variable packet_available_cv_;
-    std::condition_variable buffer_space_available_cv_;
     
     // Statistics
     std::atomic<uint64_t> total_packets_;
@@ -127,7 +123,7 @@ private:
     void flush_stale_frame();
     
 public:
-    PacketPool(size_t max_buffer_size = 10000);
+    PacketPool();
     ~PacketPool();
 
     // Add packet to buffer
