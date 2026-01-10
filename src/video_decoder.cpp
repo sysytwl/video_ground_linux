@@ -78,7 +78,7 @@ void img_decode() {
     if (img.empty()) return;
     
     if (!window_initialized) {
-        cv::namedWindow("Live", cv::WINDOW_FULLSCREEN);
+        cv::namedWindow("Live", cv:: WINDOW_NORMAL);
         //cv::setWindowProperty("Live", cv::WND_PROP_FULLSCREEN, cv::WINDOW_FULLSCREEN);
         window_initialized = true;
     }

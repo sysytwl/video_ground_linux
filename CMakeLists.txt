@@ -9,9 +9,13 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Find required packages
 find_package(Threads REQUIRED)
 find_package(PkgConfig REQUIRED)
+
 find_package(OpenCV REQUIRED) # Find OpenCV
 include_directories(${OpenCV_INCLUDE_DIRS})
-find_package(PkgConfig REQUIRED)
+
+find_package(SDL2 REQUIRED)#SDL2
+include_directories(${SDL2_INCLUDE_DIRS})
+
 pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
     libavformat
     libavcodec
@@ -69,6 +73,7 @@ target_link_libraries(${PROJECT_NAME}
     ESP32_WiFi_Injection_Sinffer
     rs_fec
     ${PCAP_LIBRARIES}
+    ${SDL2_LIBRARIES}
     Threads::Threads
     ${OpenCV_LIBS}
     PkgConfig::FFMPEG

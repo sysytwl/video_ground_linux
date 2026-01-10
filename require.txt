@@ -6,5 +6,5 @@ libopencv-dev opencv
 glibc
 linux-api-headers
 base-devel
-ffmpeg
+//ffmpeg
  vtk   libvtk9-dev

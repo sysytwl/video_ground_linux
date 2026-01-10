@@ -157,10 +157,10 @@ void PacketPool::process_active_frame() {
     }
     // Check if frame is stale and should be discarded
     else if (active_frame_.is_stale(frame_timeout_)) {
-        log_message("    timeout\n");
+       // log_message("    timeout\n");
         flush_stale_frame();
     } else {
-        log_message("    false \n");
+        //log_message("    false \n");
         //printf("incomplete pack, not able to decode. \n");
         flush_stale_frame();
     }
