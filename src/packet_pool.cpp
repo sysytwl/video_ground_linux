@@ -1,12 +1,16 @@
 #include "packet_pool.h"
+#include "wifi_inj_sin.h"
+#include "radiotap.h"
+#include "fec.h"
+#include "global_v.h"
+
 #include <iostream>
 #include <cstring>
 #include <chrono>
 #include <algorithm>
 #include <time.h>
-#include "fec.h"
-
 #include <stdarg.h>
+
 // Global or static variable
 static FILE *log_file = NULL;
 
@@ -34,6 +38,38 @@ void close_logger() {
     }
 }
 
+uint32_t calculate_fcs(const uint8_t *data, size_t len) {
+    uint32_t crc = 0xFFFFFFFF;
+    
+    for (size_t i = 0; i < len; i++) {
+        crc ^= data[i];
+        for (int j = 0; j < 8; j++) {
+            if (crc & 1) {
+                crc = (crc >> 1) ^ 0xEDB88320;
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+    
+    return ~crc;
+}
+
+int verify_fcs(const uint8_t *frame, size_t total_len) {
+    if (total_len < 4) return 0;  // Frame too short for FCS
+    
+    size_t data_len = total_len - 4;
+    uint32_t expected_fcs = calculate_fcs(frame, data_len);
+    
+    // Extract received FCS (little-endian)
+    uint32_t received_fcs = (frame[data_len + 3] << 24) |
+                           (frame[data_len + 2] << 16) |
+                           (frame[data_len + 1] << 8) |
+                           frame[data_len];
+    
+    return expected_fcs == received_fcs;
+}
+
 
 
 thread_local ZFE_FEC fec_decoder;
@@ -57,21 +93,12 @@ PacketPool::~PacketPool() {
     stop_processing();
 }
 
-bool PacketPool::add_packet(uint32_t frame_index, uint8_t part_index, const uint8_t* data, size_t data_size, bool vsync) {
+bool PacketPool::add_packet(const uint8_t* data, size_t data_size) {
     std::unique_lock<std::mutex> lock(pool_mutex_);
-
     // return if buffer is full
-    if (packet_buffer_.size() > max_packet_buffer_size_ || !running_)
-        return  false;
+    if (packet_buffer_.size() > max_packet_buffer_size_ || !running_) return  false;
 
-    // Create packet and add to buffer
-    ReceivedPacket packet;
-    packet.data.assign(data, data+data_size);
-    packet.part_index = part_index;
-    packet.frame_index = frame_index;
-    packet.data_size = data_size;
-
-    packet_buffer_.push(packet);
+    packet_buffer_.push(std::vector<uint8_t>(data, data+data_size));
     packets_received_++;
 
     //printf("add pack: %d   ", packet_buffer_.size());
@@ -87,10 +114,9 @@ void PacketPool::set_buffer_size(size_t new_size) {
 }
 
 void PacketPool::process_active_frame() {
-
     // Check if we can decode
     if (active_frame_.can_decode()) {
-        //log_message("    true \n");
+        log_message("    true \n");
         // Initialize FEC if needed
         if (fec_type == nullptr) {
             fec_decoder.init_fec();
@@ -137,11 +163,6 @@ void PacketPool::process_active_frame() {
                 active_frame_.data_size, 
                 active_frame_.frame_index == 1 && i==0
             );
-
-            // for (int j=0; j< active_frame_.data_size; j++){
-            //     log_message(" %X ", active_frame_.block_data[i][j]);
-            // }
-            // log_message("\n");
         }
 
         //printf("viedo callback latency: %d \n", active_frame_.get_elapsed_time());
@@ -157,10 +178,10 @@ void PacketPool::process_active_frame() {
     }
     // Check if frame is stale and should be discarded
     else if (active_frame_.is_stale(frame_timeout_)) {
-       // log_message("    timeout\n");
+       log_message("    timeout\n");
         flush_stale_frame();
     } else {
-        //log_message("    false \n");
+        log_message("    false \n");
         //printf("incomplete pack, not able to decode. \n");
         flush_stale_frame();
     }
@@ -191,10 +212,11 @@ void PacketPool::decoder_thread_func(int id) {
     fec_type = fec_decoder.fec_new(FEC_K, FEC_N);
     
     //packet
-    ReceivedPacket packet;
+    std::vector<uint8_t>  packet;
 
     while (running_) {
-        {        
+        clock_t start = clock();
+        {
             std::unique_lock<std::mutex> lock(pool_mutex_);
 
             // Wait for packet or shutdown
@@ -204,51 +226,125 @@ void PacketPool::decoder_thread_func(int id) {
 
             if (!running_) break;
 
-            //printf("Pack pool: %d latency %d   ", packet_buffer_.size(), active_frame_.get_elapsed_time());
-
             // Fast move operation - O(1)
             packet = std::move(packet_buffer_.front());
             packet_buffer_.pop();
+        } 
+        if (!running_) break;
+
+        ieee80211_radiotap_iterator radiotap_header;
+        ieee80211_radiotap_iterator_init(&radiotap_header, (ieee80211_radiotap_header *)packet.data(), packet.size());
+
+        bool FCS = 0;
+        while(ieee80211_radiotap_iterator_next(&radiotap_header) == 0){
+            switch (radiotap_header.this_arg_index) {
+            case IEEE80211_RADIOTAP_FLAGS:
+                if (radiotap_header.this_arg[0] & IEEE80211_RADIOTAP_F_FCS)
+                    FCS = 1;
+                break;
+
+            case IEEE80211_RADIOTAP_RATE:
+                data_rate = radiotap_header.this_arg[0]/2;
+                break;
+
+            case IEEE80211_RADIOTAP_DBM_ANTSIGNAL:
+                dbm_antsignal = radiotap_header.this_arg[0];
+                break;
+
+            default:
+                break;
+            }
         }
 
-        // Check if this is for the current active frame
-        if (active_frame_.frame_index == 0 || 
-            active_frame_.frame_index != packet.frame_index) {
+        // if(FCS){
+        //     if(!verify_fcs(packet.data() + radiotap_header.max_length, packet.size() - radiotap_header.max_length)){
+        //         log_message("FCS check fail!\n");
+        //         continue;
+        //     }
+        // }
 
-            //process last frame
-            if (active_frame_.frame_index != 0) {
-                process_active_frame();
+        // // Check if we should filter by MAC
+        // if (filter_by_mac_ && !target_mac_.empty()) {
+        //     if (!WiFiPacket::mac_matches(info.src_mac, target_mac_)) {
+        //         return;  // Skip packets not from target MAC
+        //     }
+        // }
+
+        IEEE80211_MacHeader *IEEE_HEADER = (IEEE80211_MacHeader*)(packet.data() + radiotap_header.max_length);
+
+        // Log packet info if in debug mode
+        // std::cout << "WiFi Packet - ";
+        // std::cout << WiFiPacket::get_frame_type_string(info.frame_type, info.frame_subtype);
+        // std::cout << " Src: " << info.src_mac;
+        // std::cout << " Dst: " << info.dst_mac;
+        // std::cout << " BSSID: " << info.bssid_mac;
+        //std::cout << " Size: " << pkthdr->len<< " bytes";
+        // std::cout << " Signal: " << info.radiotapinfo.signal_dbm << "dbm";
+        // std::cout << " Noise: " << info.radiotapinfo.noise_dbm << "dbm";
+        // std::cout << " Channel: " << info.radiotapinfo.channel_freq << "Hz";
+        // std::cout << " DataRate: " << info.radiotapinfo.data_rate << "Mbps" << std::endl;        
+
+        if (IEEE_HEADER->fc.type != 0b10){ //not data type
+            std::cout << "wrong frame type, plz set the filter!" << std::endl;
+            continue;
+        }
+
+        Air2Ground_Header* header = (Air2Ground_Header*)((uint8_t*)IEEE_HEADER + WLAN_IEEE80211_HEADER_SIZE);
+        if(header->packet_version != PACKET_VERSION) {
+            std::cout << "Wrong pack Version" << std::endl;
+            return;
+        }
+
+        if (header->type == Air2Ground_Header::Type::Video) {
+            Air2Ground_Video_Packet* video_header = (Air2Ground_Video_Packet*)header;
+            
+            uint32_t frame_index = video_header->frame_index;
+            uint8_t part_index = video_header->part_index;
+            size_t data_size = packet.size() - radiotap_header.max_length - WLAN_IEEE80211_HEADER_SIZE - Air2Ground_Video_Packet_Header_Size - (FCS ? 4 : 0);
+
+            // Check if this is for the current active frame
+            if (active_frame_.frame_index == 0 || active_frame_.frame_index != frame_index) {
+
+                //process last frame
+                if (active_frame_.frame_index != 0) {
+                    process_active_frame();
+                }
+
+                // Start new frame
+                log_message("frame: %d  ", frame_index);
+                active_frame_.reset(frame_index);
+                active_frame_.data_size = data_size;
             }
 
-            // Start new frame
-            //log_message("frame: %d  ",packet.frame_index);
-            active_frame_.reset(packet.frame_index);
-            active_frame_.data_size = packet.data_size;
+            // Validate packet
+            if (part_index >= FEC_N) {
+                packets_wasted_++;
+                printf("Invalid part index: %d\n", part_index);
+                continue;
+            }
+
+            if (data_size != active_frame_.data_size) {
+                packets_wasted_++;
+                printf("Size mismatch for frame %u: expected %zu, got %zu\n",
+                    frame_index, active_frame_.data_size, data_size);
+                continue;
+            }
+
+            // Store packet in active frame
+            memcpy(
+                active_frame_.block_data[part_index],
+                (uint8_t*) video_header + Air2Ground_Video_Packet_Header_Size,
+                data_size
+            );
+            active_frame_.block_status[part_index] = true;
+
+            log_message(" part: %d    ", part_index);
         }
 
-        // Validate packet
-        if (packet.part_index >= FEC_N) {
-            packets_wasted_++;
-            printf("Invalid part index: %d\n", packet.part_index);
-            continue;
-        }
+        packet.clear();
 
-        if (packet.data_size != active_frame_.data_size) {
-            packets_wasted_++;
-            printf("Size mismatch for frame %u: expected %zu, got %zu\n",
-                   packet.frame_index, active_frame_.data_size, packet.data_size);
-            continue;
-        }
-
-        // Store packet in active frame
-        memcpy(
-            active_frame_.block_data[packet.part_index],
-            packet.data.data(),
-            packet.data_size
-        );
-        active_frame_.block_status[packet.part_index] = true;
-
-        //log_message(" part: %d    ", packet.part_index);
+    clock_t end = clock();
+    //log_message("Callback took: %ld us  \n ", (end-start)*1000000/CLOCKS_PER_SEC);
     }
     
     // Cleanup thread-local FEC
@@ -324,7 +420,7 @@ void PacketPool::stop_processing() {
     printf("Processing time: %.2f seconds\n", elapsed_time);
     if (elapsed_time > 0) {
         printf("Data rate: %.2f KB/s\n", 
-               (packets_received_ * 1500.0) / (elapsed_time * 1024.0));
+               (packets_received_ * 1024.0) / (elapsed_time * 1024.0));
     }
     printf("==============================\n");
 }

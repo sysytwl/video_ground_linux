@@ -64,35 +64,47 @@ void video_callback(const uint8_t* data, size_t size, bool vsync) {
 #include <chrono>
 #include <deque>
 
-const int MAX_FPS = 30;
+const int MAX_FPS = 5;
 std::deque<std::chrono::steady_clock::time_point> timestamps;
 bool window_initialized = false;
 
-void img_decode() {
-    if (img_buffer.empty()) return;
-    
+#include "gamepad_osd.h"
+
+extern OSDMenu g_osd_menu; 
+
+
+cv::Mat img;
+void img_decode(bool img_decode) {
     auto decode_start = std::chrono::steady_clock::now();
-    cv::Mat img = cv::imdecode(img_buffer, cv::IMREAD_COLOR);
-    auto decode_end = std::chrono::steady_clock::now();
-    
-    if (img.empty()) return;
-    
+
+    if (img_decode){
+        if (img_buffer.empty()) return;
+        img = cv::imdecode(img_buffer, cv::IMREAD_COLOR);
+        if (img.empty()) return;
+    }
+
     if (!window_initialized) {
-        cv::namedWindow("Live", cv:: WINDOW_NORMAL);
-        //cv::setWindowProperty("Live", cv::WND_PROP_FULLSCREEN, cv::WINDOW_FULLSCREEN);
+        cv::namedWindow("Live", cv::WINDOW_AUTOSIZE);
+        cv::setWindowProperty("Live", cv::WND_PROP_FULLSCREEN, cv::WINDOW_FULLSCREEN);
         window_initialized = true;
     }
     
     // Fast resize with aspect ratio
-    int sw = 1280, sh = 720;  // Screen resolution
-    cv::Mat display = cv::Mat::zeros(sh, sw, img.type());
-    
-    float scale = std::min((float)sw / img.cols, (float)sh / img.rows);
-    int nw = img.cols * scale, nh = img.rows * scale;
-    int xo = (sw - nw) / 2, yo = (sh - nh) / 2;
-    
-    cv::resize(img, display(cv::Rect(xo, yo, nw, nh)), cv::Size(nw, nh));
-    
+    // Try to get actual screen resolution
+    // cv::Rect window_rect = cv::getWindowImageRect("Live Video");
+    // screen_width = window_rect.width;
+    // screen_height = window_rect.height;
+
+    int sw = 1280, sh = 800;
+    cv::Mat display = cv::Mat::zeros(sh, sw, CV_8UC3);
+
+    if (img_decode){
+        float scale = std::min((float)sw / img.cols, (float)sh / img.rows);
+        int nw = img.cols * scale, nh = img.rows * scale;
+        int xo = (sw - nw) / 2, yo = (sh - nh) / 2;
+        cv::resize(img, display(cv::Rect(xo, yo, nw, nh)), cv::Size(nw, nh));
+    }
+
     // FPS calculation
     auto now = std::chrono::steady_clock::now();
     timestamps.push_back(now);
@@ -107,14 +119,27 @@ void img_decode() {
     
     // Draw red cross at screen center
     int cx = sw / 2, cy = sh / 2, cs = 15;
-    cv::line(display, cv::Point(cx - cs, cy), cv::Point(cx + cs, cy), cv::Scalar(0, 0, 255), 2);
-    cv::line(display, cv::Point(cx, cy - cs), cv::Point(cx, cy + cs), cv::Scalar(0, 0, 255), 2);
+    cv::line(display, cv::Point(cx - cs, cy), cv::Point(cx + cs, cy), 
+             cv::Scalar(0, 0, 255), 2);
+    cv::line(display, cv::Point(cx, cy - cs), cv::Point(cx, cy + cs), 
+             cv::Scalar(0, 0, 255), 2);
     
     // Draw FPS (green)
     cv::putText(display, cv::format("FPS: %.1f", fps), 
                 cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 0.7, 
                 cv::Scalar(0, 255, 0), 2);
     
+    // Draw OSD menu - 添加空指针检查
+    if (&g_osd_menu != nullptr) {
+        g_osd_menu.draw(display, sw, sh);
+    }
+    
+    auto decode_end = std::chrono::steady_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(decode_end-decode_start);
+    cv::putText(display, cv::format("Delay: %d",duration), 
+                cv::Point(180, 30), cv::FONT_HERSHEY_SIMPLEX, 0.7, 
+                cv::Scalar(0, 255, 0), 2);
+
     cv::imshow("Live", display);
     cv::waitKey(1);
 }
@@ -128,7 +153,7 @@ void video_decoder_loop() {
         {
             // Lock scope - only for queue operations
             std::unique_lock<std::mutex> lock(queue_mutex);
-            pack_buffer_cv_.wait(lock, []{ 
+            pack_buffer_cv_.wait_for(lock, std::chrono::milliseconds(34), []{ 
                 return !pack_buffer.empty() || !running; 
             });
             
@@ -139,14 +164,16 @@ void video_decoder_loop() {
                 current_packet = std::move(pack_buffer.front().buffer);
                 pack_buffer.pop();
             }
-        }  // Lock is released here - queue_mutex is no longer held
-        
+        }
+
+        if(!running) break;
+
         // Process the packet without holding the lock
         if (!current_packet.empty()) {
             // Look for start marker (0xFFD8)
             size_t start_pos = find_marker(current_packet, 0xFF, 0xD8);
             if (start_pos == 0) {
-                img_decode();
+                img_decode(true);
                 img_buffer.clear();
             }
             
@@ -155,6 +182,8 @@ void video_decoder_loop() {
                 img_buffer.end(),
                 current_packet.begin(),
                 current_packet.end());
+        } else {
+            img_decode(false);
         }
     }
 }
@@ -162,4 +191,5 @@ void video_decoder_loop() {
 void video_stop() {
     running = false;
     pack_buffer_cv_.notify_all();
+    cv::destroyAllWindows();
 }

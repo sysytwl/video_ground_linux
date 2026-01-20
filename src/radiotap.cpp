@@ -1,164 +1,247 @@
+/*
+ * Radiotap parser
+ *
+ * Copyright 2007		Andy Green <andy@warmcat.com>
+ */
+
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <errno.h>
+#include <resolv.h>
+#include <string.h>
+#include <utime.h>
+#include <unistd.h>
+#include <getopt.h>
+#include <pcap.h>
+#include <endian.h>
+
 #include "radiotap.h"
-#include <iostream>
 
-struct RadiotapHeader {
-    uint8_t version;      // Always 0
-    uint8_t pad;
-    uint16_t length;      // Entire header length
-    uint32_t present_flags;  // Bitmask of fields present
-};
+/**
+ * ieee80211_radiotap_iterator_init - radiotap parser iterator initialization
+ * @iterator: radiotap_iterator to initialize
+ * @radiotap_header: radiotap header to parse
+ * @max_length: total length we can parse into (eg, whole packet length)
+ *
+ * Returns: 0 or a negative error code if there is a problem.
+ *
+ * This function initializes an opaque iterator struct which can then
+ * be passed to ieee80211_radiotap_iterator_next() to visit every radiotap
+ * argument which is present in the header.  It knows about extended
+ * present headers and handles them.
+ *
+ * How to use:
+ * call __ieee80211_radiotap_iterator_init() to init a semi-opaque iterator
+ * struct ieee80211_radiotap_iterator (no need to init the struct beforehand)
+ * checking for a good 0 return code.  Then loop calling
+ * __ieee80211_radiotap_iterator_next()... it returns either 0,
+ * -ENOENT if there are no more args to parse, or -EINVAL if there is a problem.
+ * The iterator's @this_arg member points to the start of the argument
+ * associated with the current argument index that is present, which can be
+ * found in the iterator's @this_arg_index member.  This arg index corresponds
+ * to the IEEE80211_RADIOTAP_... defines.
+ *
+ * Radiotap header length:
+ * You can find the CPU-endian total radiotap header length in
+ * iterator->max_length after executing ieee80211_radiotap_iterator_init()
+ * successfully.
+ *
+ * Example code:
+ * See Documentation/networking/radiotap-headers.txt
+ */
 
-// Radiotap field flags
-enum RadiotapPresentFlags : uint32_t {
-    TSFT = (1 << 0),
-    FLAGS = (1 << 1),
-    RATE = (1 << 2),
-    CHANNEL = (1 << 3),
-    FHSS = (1 << 4),
-    DBM_ANTENNA_SIGNAL = (1 << 5),
-    DBM_ANTENNA_NOISE = (1 << 6),
-    LOCK_QUALITY = (1 << 7),
-    TX_ATTENUATION = (1 << 8),
-    DB_TX_ATTENUATION = (1 << 9),
-    DBM_TX_POWER = (1 << 10),
-    ANTENNA = (1 << 11),
-    DB_ANTENNA_SIGNAL = (1 << 12),
-    DB_ANTENNA_NOISE = (1 << 13),
-    RX_FLAGS = (1 << 14),
-    TX_FLAGS = (1 << 15),
-    RTS_RETRIES = (1 << 16),
-    DATA_RETRIES = (1 << 17),
-    MCS = (1 << 19),
-    A_MPDU = (1 << 20),
-    VHT = (1 << 21),
-    TIMESTAMP = (1 << 22),
-    HE = (1 << 23),
-    HE_MU = (1 << 24)
-};
+int ieee80211_radiotap_iterator_init(
+    struct ieee80211_radiotap_iterator *iterator,
+    struct ieee80211_radiotap_header *radiotap_header,
+    int max_length)
+{
+	/* Linux only supports version 0 radiotap format */
+	if (radiotap_header->it_version)
+		return -EINVAL;
 
-// Helper function to align offset
-static inline size_t align_offset(size_t offset, size_t alignment) {
-    return (offset + alignment - 1) & ~(alignment - 1);
+	/* sanity check for allowed length and radiotap length field */
+    if (max_length < radiotap_header->it_len)
+		return -EINVAL;
+
+	iterator->rtheader = radiotap_header;
+    iterator->max_length = radiotap_header->it_len;
+	iterator->arg_index = 0;
+    iterator->bitmap_shifter = radiotap_header->it_present;
+    iterator->arg = (uint8_t *)radiotap_header + sizeof(*radiotap_header);
+	iterator->this_arg = 0;
+
+	/* find payload start allowing for extended bitmap(s) */
+
+    if (iterator->bitmap_shifter & (1<<IEEE80211_RADIOTAP_EXT)) {
+        while ((*((uint32_t *)iterator->arg)) &
+				   (1<<IEEE80211_RADIOTAP_EXT)) {
+            iterator->arg += sizeof(uint32_t);
+
+			/*
+			 * check for insanity where the present bitmaps
+			 * keep claiming to extend up to or even beyond the
+			 * stated radiotap header length
+			 */
+
+			if (((ulong)iterator->arg -
+			     (ulong)iterator->rtheader) > (ulong)iterator->max_length)
+				return -EINVAL;
+		}
+
+        iterator->arg += sizeof(uint32_t);
+
+		/*
+		 * no need to check again for blowing past stated radiotap
+		 * header length, because ieee80211_radiotap_iterator_next
+		 * checks it before it is dereferenced
+		 */
+	}
+
+	/* we are all initialized happily */
+
+	return 0;
 }
 
-size_t parse_header(const uint8_t* packet, uint32_t caplen, RadiotapInfo& info) {
-    // Reset info structure
-    info = RadiotapInfo{};
 
-    const RadiotapHeader* radiotap = reinterpret_cast<const RadiotapHeader*>(packet);
+/**
+ * ieee80211_radiotap_iterator_next - return next radiotap parser iterator arg
+ * @iterator: radiotap_iterator to move to next arg (if any)
+ *
+ * Returns: 0 if there is an argument to handle,
+ * -ENOENT if there are no more args or -EINVAL
+ * if there is something else wrong.
+ *
+ * This function provides the next radiotap arg index (IEEE80211_RADIOTAP_*)
+ * in @this_arg_index and sets @this_arg to point to the
+ * payload for the field.  It takes care of alignment handling and extended
+ * present fields.  @this_arg can be changed by the caller (eg,
+ * incremented to move inside a compound argument like
+ * IEEE80211_RADIOTAP_CHANNEL).  The args pointed to are in
+ * little-endian format whatever the endianess of your CPU.
+ */
 
-    // // Check if we have the full Radiotap header
-    // if (caplen < radiotap->length || radiotap->length < sizeof(RadiotapHeader)) {
-    //     return 0;
-    // }
-    
-    // info.radiotap_len = radiotap->length;
-    
-    // // Parse variable fields based on present_flags
-    // uint32_t present = radiotap->present_flags;
-    // size_t offset = sizeof(RadiotapHeader);
-    
-    // // Handle extended present flags (if bit 31 is set, there are more present flags)
-    // while (present & (1U << 31)) {
-    //     if (offset + 4 > caplen) {
-    //         return 0;
-    //     }
-    //     present = *reinterpret_cast<const uint32_t*>(packet + offset);
-    //     offset += 4;
-    // }
-    
-    // // Now parse the actual fields in order of the bits set
-    // for (uint32_t bit = 0; bit < 32; bit++) {
-    //     if (!(present & (1U << bit))) {
-    //         continue;
-    //     }
-        
-    //     switch (bit) {
-    //         case 0: // TSFT (8 bytes, 8-byte aligned)
-    //             offset = align_offset(offset, 8);
-    //             if (offset + 8 <= caplen) {
-    //                 offset += 8;  // Skip timestamp
-    //             }
-    //             break;
-                
-    //         case 1: // FLAGS (1 byte, 1-byte aligned)
-    //             offset = align_offset(offset, 1);
-    //             if (offset + 1 <= caplen) {
-    //                 offset += 1;  // Skip flags
-    //             }
-    //             break;
-                
-    //         case 2: // RATE (1 byte, 1-byte aligned)
-    //             offset = align_offset(offset, 1);
-    //             if (offset + 1 <= caplen) {
-    //                 info.data_rate = packet[offset];
-    //                 info.has_rate = true;
-    //                 offset += 1;
-    //             }
-    //             break;
-                
-    //         case 3: // CHANNEL (2 bytes freq + 2 bytes flags, 2-byte aligned)
-    //             offset = align_offset(offset, 2);
-    //             if (offset + 4 <= caplen) {
-    //                 info.channel_freq = *reinterpret_cast<const uint16_t*>(packet + offset);
-    //                 info.channel_flags = *reinterpret_cast<const uint16_t*>(packet + offset + 2);
-    //                 info.has_channel = true;
-    //                 offset += 4;
-    //             }
-    //             break;
-                
-    //         case 5: // DBM_ANTENNA_SIGNAL (1 byte, 1-byte aligned)
-    //             offset = align_offset(offset, 1);
-    //             if (offset + 1 <= caplen) {
-    //                 info.signal_dbm = static_cast<int8_t>(packet[offset]);
-    //                 info.has_signal = true;
-    //                 offset += 1;
-    //             }
-    //             break;
-                
-    //         case 6: // DBM_ANTENNA_NOISE (1 byte, 1-byte aligned)
-    //             offset = align_offset(offset, 1);
-    //             if (offset + 1 <= caplen) {
-    //                 info.noise_dbm = static_cast<int8_t>(packet[offset]);
-    //                 info.has_noise = true;
-    //                 offset += 1;
-    //             }
-    //             break;
-                
-    //         case 11: // ANTENNA (1 byte, 1-byte aligned)
-    //             offset = align_offset(offset, 1);
-    //             if (offset + 1 <= caplen) {
-    //                 info.antenna = packet[offset];
-    //                 info.has_antenna = true;
-    //                 offset += 1;
-    //             }
-    //             break;
-                
-    //         case 12: // DB_ANTENNA_SIGNAL (1 byte, 1-byte aligned) - signal in dB
-    //             offset = align_offset(offset, 1);
-    //             if (offset + 1 <= caplen && !info.has_signal) {
-    //                 // Convert from dB to dBm (approximate)
-    //                 info.signal_dbm = static_cast<int8_t>(packet[offset]);
-    //                 info.has_signal = true;
-    //                 offset += 1;
-    //             } else {
-    //                 offset += 1;
-    //             }
-    //             break;
-                
-    //         // Add more cases for other fields as needed
-    //         default:
-    //             // Unknown field - skip with proper alignment
-    //             // For simplicity, we'll align to 1 byte and skip 1 byte
-    //             offset = align_offset(offset, 1);
-    //             offset += 1;
-    //             break;
-    //     }
-        
-    //     if (offset > caplen) {
-    //         return 0;
-    //     }
-    // }
-    
-    return radiotap->length;
+int ieee80211_radiotap_iterator_next(
+    struct ieee80211_radiotap_iterator *iterator)
+{
+
+	/*
+	 * small length lookup table for all radiotap types we heard of
+	 * starting from b0 in the bitmap, so we can walk the payload
+	 * area of the radiotap header
+	 *
+	 * There is a requirement to pad args, so that args
+	 * of a given length must begin at a boundary of that length
+	 * -- but note that compound args are allowed (eg, 2 x u16
+	 * for IEEE80211_RADIOTAP_CHANNEL) so total arg length is not
+	 * a reliable indicator of alignment requirement.
+	 *
+	 * upper nybble: content alignment for arg
+	 * lower nybble: content length for arg
+	 */
+
+    static const uint8_t rt_sizes[] = {
+		[IEEE80211_RADIOTAP_TSFT] = 0x88,
+		[IEEE80211_RADIOTAP_FLAGS] = 0x11,
+		[IEEE80211_RADIOTAP_RATE] = 0x11,
+		[IEEE80211_RADIOTAP_CHANNEL] = 0x24,
+		[IEEE80211_RADIOTAP_FHSS] = 0x22,
+		[IEEE80211_RADIOTAP_DBM_ANTSIGNAL] = 0x11,
+		[IEEE80211_RADIOTAP_DBM_ANTNOISE] = 0x11,
+		[IEEE80211_RADIOTAP_LOCK_QUALITY] = 0x22,
+		[IEEE80211_RADIOTAP_TX_ATTENUATION] = 0x22,
+		[IEEE80211_RADIOTAP_DB_TX_ATTENUATION] = 0x22,
+		[IEEE80211_RADIOTAP_DBM_TX_POWER] = 0x11,
+		[IEEE80211_RADIOTAP_ANTENNA] = 0x11,
+		[IEEE80211_RADIOTAP_DB_ANTSIGNAL] = 0x11,
+		[IEEE80211_RADIOTAP_DB_ANTNOISE] = 0x11
+		/*
+		 * add more here as they are defined in
+		 * include/net/ieee80211_radiotap.h
+		 */
+	};
+
+	/*
+	 * for every radiotap entry we can at
+	 * least skip (by knowing the length)...
+	 */
+
+	while (iterator->arg_index < (int)sizeof(rt_sizes)) {
+		int hit = 0;
+		int pad;
+
+		if (!(iterator->bitmap_shifter & 1))
+			goto next_entry; /* arg not present */
+
+		/*
+		 * arg is present, account for alignment padding
+		 *  8-bit args can be at any alignment
+		 * 16-bit args must start on 16-bit boundary
+		 * 32-bit args must start on 32-bit boundary
+		 * 64-bit args must start on 64-bit boundary
+		 *
+		 * note that total arg size can differ from alignment of
+		 * elements inside arg, so we use upper nybble of length
+		 * table to base alignment on
+		 *
+		 * also note: these alignments are ** relative to the
+		 * start of the radiotap header **.  There is no guarantee
+		 * that the radiotap header itself is aligned on any
+		 * kind of boundary.
+		 */
+
+		pad = (((ulong)iterator->arg) -
+			((ulong)iterator->rtheader)) &
+			((rt_sizes[iterator->arg_index] >> 4) - 1);
+
+		if (pad)
+			iterator->arg +=
+				(rt_sizes[iterator->arg_index] >> 4) - pad;
+
+		/*
+		 * this is what we will return to user, but we need to
+		 * move on first so next call has something fresh to test
+		 */
+		iterator->this_arg_index = iterator->arg_index;
+		iterator->this_arg = iterator->arg;
+		hit = 1;
+
+		/* internally move on the size of this arg */
+		iterator->arg += rt_sizes[iterator->arg_index] & 0x0f;
+
+		/*
+		 * check for insanity where we are given a bitmap that
+		 * claims to have more arg content than the length of the
+		 * radiotap section.  We will normally end up equalling this
+		 * max_length on the last arg, never exceeding it.
+		 */
+
+		if (((ulong)iterator->arg - (ulong)iterator->rtheader) >
+		    (ulong)iterator->max_length)
+			return -EINVAL;
+
+	next_entry:
+		iterator->arg_index++;
+        if ((iterator->arg_index & 31) == 0) {
+			/* completed current u32 bitmap */
+			if (iterator->bitmap_shifter & 1) {
+				/* b31 was set, there is more */
+				/* move to next u32 bitmap */
+                iterator->bitmap_shifter = *iterator->next_bitmap;
+				iterator->next_bitmap++;
+			} else {
+				/* no more bitmaps: end */
+				iterator->arg_index = sizeof(rt_sizes);
+			}
+		} else { /* just try the next bit */
+			iterator->bitmap_shifter >>= 1;
+		}
+
+		/* if we found a valid arg earlier, return it now */
+		if (hit)
+			return 0;
+	}
+
+	/* we don't know how to handle any more args, we're done */
+	return -ENOENT;
 }

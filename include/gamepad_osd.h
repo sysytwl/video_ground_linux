@@ -11,6 +11,7 @@
 #include <linux/joystick.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <thread>
 
 struct GamepadState {
     float left_x = 0.0f;
@@ -67,6 +68,7 @@ private:
     
     std::vector<MenuItem> menu_items_;
     size_t selected_item_ = 0;
+    bool display_menu_=1;
     std::mutex menu_mutex_;
     
     // Interface selection
@@ -84,6 +86,7 @@ public:
     void navigate_left();
     void navigate_right();
     void select_current();
+    void display_menu();
     
     void draw(cv::Mat& frame, int width, int height);
     

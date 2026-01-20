@@ -45,7 +45,6 @@ struct PacketInfo {
     bool is_data_frame;
     bool is_protected;
     size_t wifi_header_offset;
-    RadiotapInfo radiotapinfo;
     
     // Constructor
     PacketInfo() : frame_type(0), frame_subtype(0), 

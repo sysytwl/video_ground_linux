@@ -1,7 +1,5 @@
 #include "packet_sniffer.h"
-#include "wifi_inj_sin.h"
-#include "radiotap.h"
-#include "video_decoder.h"
+
 #include <iostream>
 #include <cstring>
 #include <arpa/inet.h>
@@ -108,6 +106,111 @@ bool PacketSniffer::initialize_pcap(std::string interface) {
     return true;
 }
 
+bool PacketSniffer::initialize_multi(const std::vector<std::string>& interfaces,
+                                    uint8_t cases, 
+                                    const std::string& filter_exp) {
+    interfaces_ = interfaces;
+    
+    for (const auto& interface : interfaces) {
+        char errbuf[PCAP_ERRBUF_SIZE];
+        pcap_t* handle = pcap_create(interface.c_str(), errbuf);
+        
+        if (handle) {
+            pcap_set_buffer_size(handle, 128 * 1024);
+            pcap_set_timeout(handle, 10);
+            pcap_set_promisc(handle, 1);
+            pcap_set_snaplen(handle, BUFSIZ);
+            
+            if (pcap_activate(handle) != 0) {
+                pcap_close(handle);
+                handle = pcap_open_live(interface.c_str(), BUFSIZ, 1, 10, errbuf);
+            }
+            
+            if (handle) {
+                // Setup filter for this interface
+                struct bpf_program fp;
+                std::string actual_filter = filter_exp;
+                
+                if (cases == 1 && !filter_exp.empty()) {
+                    WiFiPacket::remove_char(actual_filter, ':');
+                    actual_filter = "wlan addr2 " + actual_filter;
+                }
+                
+                if (pcap_compile(handle, &fp, actual_filter.c_str(), 0, 
+                                 PCAP_NETMASK_UNKNOWN) == 0) {
+                    pcap_setfilter(handle, &fp);
+                    pcap_freecode(&fp);
+                }
+                
+                multi_handles_.push_back(handle);
+                std::cout << "Initialized interface: " << interface << std::endl;
+            }
+        }
+    }
+    
+    return !multi_handles_.empty();
+}
+
+#include "video_decoder.h"
+void PacketSniffer::start_multi_capture(int packet_count) {
+    // Start packet pool processing
+    packet_pool_.start_processing(2, video_callback, nullptr); // 2 threads
+    
+    std::cout << "\nStarting multi-interface capture on " 
+              << multi_handles_.size() << " interfaces..." << std::endl;
+    
+    running_ = true;
+    
+    // Start a capture thread for each interface
+    for (auto handle : multi_handles_) {
+        capture_threads_.emplace_back(&PacketSniffer::single_capture_thread, 
+                                       this, handle, packet_count);
+    }
+}
+
+void PacketSniffer::single_capture_thread(pcap_t* handle, int packet_count) {
+    int result = pcap_loop(handle, packet_count, 
+                          PacketSniffer::pcap_callback_multi, 
+                          (u_char*)this);
+    
+    if (result == -1) {
+        std::cerr << "Error in pcap_loop: " << pcap_geterr(handle) << std::endl;
+    }
+}
+
+void PacketSniffer::pcap_callback_multi(u_char* user_data, 
+                                        const struct pcap_pkthdr* pkthdr, 
+                                        const u_char* packet) {
+    PacketSniffer* sniffer = reinterpret_cast<PacketSniffer*>(user_data);
+    sniffer->packet_handler(pkthdr, packet);
+}
+
+void PacketSniffer::stop_multi_capture() {
+    running_ = false;
+    
+    // Break all pcap loops
+    for (auto handle : multi_handles_) {
+        pcap_breakloop(handle);
+    }
+    
+    // Wait for all threads
+    for (auto& thread : capture_threads_) {
+        if (thread.joinable()) {
+            thread.join();
+        }
+    }
+    capture_threads_.clear();
+    
+    // Close all handles
+    for (auto handle : multi_handles_) {
+        pcap_close(handle);
+    }
+    multi_handles_.clear();
+    
+    // Stop packet pool
+    packet_pool_.stop_processing();
+}
+
 bool PacketSniffer::setup_filter(uint8_t cases,std::string filter_exp) {
     struct bpf_program fp;
 
@@ -147,77 +250,8 @@ bool PacketSniffer::setup_filter(uint8_t cases,std::string filter_exp) {
 }
 
 void PacketSniffer::packet_handler(const struct pcap_pkthdr* pkthdr, const u_char* packet) {
-    //clock_t start = clock();
-
-    PacketInfo info;
-    info.header = *pkthdr;
-
-    size_t offset = 0;
-
-    // Parse Radiotap header if present
-    if (link_type_ == 127) {  // DLT_IEEE802_11_RADIO = 127
-        offset = parse_header(packet, pkthdr->caplen, info.radiotapinfo);
-        // if (offset == 0 || offset >= pkthdr->caplen) {
-        //     return;  // Failed to parse or no data left
-        // }
-        info.wifi_header_offset = offset;
-    } else {
-        info.wifi_header_offset = 0;
-    }
-
-    // Parse 802.11 header
-    if (!WiFiPacket::parse_80211_header(packet + offset, pkthdr->caplen - offset, info)) {
-        return;  // Not a valid WiFi packet
-    }
-    
-    // // Check if we should filter by MAC
-    // if (filter_by_mac_ && !target_mac_.empty()) {
-    //     if (!WiFiPacket::mac_matches(info.src_mac, target_mac_)) {
-    //         return;  // Skip packets not from target MAC
-    //     }
-    // }
-
-    if (!info.is_data_frame){
-        std::cout << "wrong frame type, plz set the filter!" << std::endl;
-        return;
-    }
-
-    Air2Ground_Header* header = (Air2Ground_Header*)(packet + offset + WLAN_IEEE80211_HEADER_SIZE);
-    if(header->packet_version != PACKET_VERSION) {
-        std::cout << "Wrong pack Version" << std::endl;
-        return;
-    }
-
-    if (header->type == Air2Ground_Header::Type::Video) {
-        Air2Ground_Video_Packet* video_header = (Air2Ground_Video_Packet*)header;
-        
-        uint32_t frame_index = video_header->frame_index;
-        uint8_t part_index = video_header->part_index;
-
-        // Add to pool
-        packet_pool_.add_packet(
-            frame_index,
-            part_index, 
-            (uint8_t*)(video_header)+Air2Ground_Video_Packet_Header_Size,
-            pkthdr->caplen - offset - WLAN_IEEE80211_HEADER_SIZE - Air2Ground_Video_Packet_Header_Size,
-            video_header->last_part
-        );
-    }
-
-    // Log packet info if in debug mode
-    // std::cout << "WiFi Packet - ";
-    // std::cout << WiFiPacket::get_frame_type_string(info.frame_type, info.frame_subtype);
-    // std::cout << " Src: " << info.src_mac;
-    // std::cout << " Dst: " << info.dst_mac;
-    // std::cout << " BSSID: " << info.bssid_mac;
-    //std::cout << " Size: " << pkthdr->len<< " bytes";
-    // std::cout << " Signal: " << info.radiotapinfo.signal_dbm << "dbm";
-    // std::cout << " Noise: " << info.radiotapinfo.noise_dbm << "dbm";
-    // std::cout << " Channel: " << info.radiotapinfo.channel_freq << "Hz";
-    // std::cout << " DataRate: " << info.radiotapinfo.data_rate << "Mbps" << std::endl;
-
-    //clock_t end = clock();
-    //printf("Callback took: %ld us  \n ", (end-start)*1000000/CLOCKS_PER_SEC);
+    // Add to pool
+    packet_pool_.add_packet(packet, pkthdr->caplen);
 }
 
 void PacketSniffer::start_capture(int packet_count) {

@@ -81,12 +81,14 @@ void GamepadHandler::process_event(const js_event& event) {
                 case 1: current_state_.left_y = normalized; break;
                 case 2: current_state_.right_x = normalized; break;
                 case 3: current_state_.right_y = normalized; break;
-                case 4: // D-pad left/right
+                case 4: break; //left trigger
+                case 5: break; //right trigger
+                case 6: // D-pad left/right
                     if (event.value < -8000) current_state_.dpad_left = true;
                     else if (event.value > 8000) current_state_.dpad_right = true;
                     else current_state_.dpad_left = current_state_.dpad_right = false;
                     break;
-                case 5: // D-pad up/down
+                case 7: // D-pad up/down
                     if (event.value < -8000) current_state_.dpad_up = true;
                     else if (event.value > 8000) current_state_.dpad_down = true;
                     else current_state_.dpad_up = current_state_.dpad_down = false;
@@ -172,9 +174,16 @@ void OSDMenu::select_current() {
     }
 }
 
+void OSDMenu::display_menu(){
+    std::lock_guard<std::mutex> lock(menu_mutex_);
+    display_menu_= !display_menu_;
+}
+
 void OSDMenu::draw(cv::Mat& frame, int width, int height) {
     std::lock_guard<std::mutex> lock(menu_mutex_);
     
+    if(!display_menu_) return;
+
     int menu_width = 400;
     int menu_height = 300;
     int start_x = (width - menu_width) / 2;
@@ -230,7 +239,7 @@ void OSDMenu::draw(cv::Mat& frame, int width, int height) {
 }
 
 std::string OSDMenu::get_selected_interface() const {
-    std::lock_guard<std::mutex> lock(menu_mutex_);
+    //std::unique_lock<std::mutex> lock(menu_mutex_);
     if (menu_items_.size() > 1 && menu_items_[1].options.size() > menu_items_[1].selected) {
         return menu_items_[1].options[menu_items_[1].selected];
     }
@@ -238,7 +247,7 @@ std::string OSDMenu::get_selected_interface() const {
 }
 
 std::string OSDMenu::get_selected_mac() const {
-    std::lock_guard<std::mutex> lock(menu_mutex_);
+    //std::lock_guard<std::mutex> lock(menu_mutex_);
     if (menu_items_.size() > 2 && menu_items_[2].options.size() > menu_items_[2].selected) {
         if (menu_items_[2].selected == 0) return ""; // "All" option
         return menu_items_[2].options[menu_items_[2].selected];
@@ -247,7 +256,7 @@ std::string OSDMenu::get_selected_mac() const {
 }
 
 bool OSDMenu::should_start_capture() const {
-    std::lock_guard<std::mutex> lock(menu_mutex_);
+    //std::lock_guard<std::mutex> lock(menu_mutex_);
     if (menu_items_.size() > 3) {
         return menu_items_[3].options[0] == "Stop Capture";
     }

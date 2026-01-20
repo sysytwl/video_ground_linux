@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(wifi_sniffer VERSION 1.0.0 LANGUAGES CXX)
+project(WiFiVideoReceiver VERSION 1.0.0 LANGUAGES CXX)
 
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 14)
@@ -73,8 +73,8 @@ target_link_libraries(${PROJECT_NAME}
     ESP32_WiFi_Injection_Sinffer
     rs_fec
     ${PCAP_LIBRARIES}
-    ${SDL2_LIBRARIES}
+    #${SDL2_LIBRARIES}
     Threads::Threads
     ${OpenCV_LIBS}
-    PkgConfig::FFMPEG
+    #PkgConfig::FFMPEG
 )

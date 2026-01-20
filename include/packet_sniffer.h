@@ -20,7 +20,17 @@ private:
     
     // Command line arguments
     std::map<std::string, std::string> args_;
+
+    //multiple wifi card support
+    std::vector<pcap_t*> multi_handles_;
+    std::vector<std::thread> capture_threads_;
+    std::vector<std::string> interfaces_;
     
+    void single_capture_thread(pcap_t* handle, int packet_count);
+    static void pcap_callback_multi(u_char* user_data, 
+                                    const struct pcap_pkthdr* pkthdr, 
+                                    const u_char* packet);
+
     // Helper methods
     bool initialize_pcap(std::string interface);
     bool setup_filter(uint8_t cases,std::string filter_exp);
@@ -38,6 +48,13 @@ public:
     // Static callback for pcap_loop
     static void pcap_callback(u_char* user_data, const struct pcap_pkthdr* pkthdr, 
                               const u_char* packet);
+
+    // Multi-interface support
+    bool initialize_multi(const std::vector<std::string>& interfaces, 
+                         uint8_t cases, 
+                         const std::string& filter_exp);
+    void start_multi_capture(int packet_count = 0);
+    void stop_multi_capture();
 };
 
 #endif // PACKET_SNIFFER_H

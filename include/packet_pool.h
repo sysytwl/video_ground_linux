@@ -12,8 +12,8 @@
 #include <unordered_map>
 #include "wifi_packet.h"
 
-#define FEC_K 6
-#define FEC_N 12
+#define FEC_K 4
+#define FEC_N 7
 
 // C-style callback for decoded data
 typedef void (*PacketCallback)(const uint8_t* data, size_t size, bool vsync);
@@ -89,7 +89,7 @@ private:
     };
 
     // Flexible packet buffer
-    std::queue<ReceivedPacket> packet_buffer_;
+    std::queue<std::vector<uint8_t>> packet_buffer_;
     size_t max_packet_buffer_size_ = 1000;  // Configurable buffer size
     
 
@@ -127,8 +127,7 @@ public:
     ~PacketPool();
 
     // Add packet to buffer
-    bool add_packet(uint32_t frame_index, uint8_t part_index, 
-                    const uint8_t* data, size_t data_size, bool vsync);
+    bool add_packet(const uint8_t* data, size_t data_size);
     
     // Set buffer size (can be called dynamically)
     void set_buffer_size(size_t new_size);
