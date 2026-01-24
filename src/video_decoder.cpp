@@ -14,50 +14,28 @@
 struct ImageBuffer {
     std::vector<uint8_t> buffer;
     bool can_decode;
+    uint8_t count;
 };
 std::queue<ImageBuffer> pack_buffer;
 std::mutex queue_mutex;
 std::condition_variable pack_buffer_cv_;
 std::atomic<bool> running{true};
-
 std::vector<uint8_t> img_buffer;
 
-// Helper function to find marker in data
-size_t find_marker(const std::vector<uint8_t>& data, uint8_t marker1, uint8_t marker2) {
-    if (data.size() < 2) return std::string::npos;
-    
-    const uint8_t* ptr = data.data();
-    const uint8_t* end = ptr + data.size() - 1;
-    
-    while (ptr < end) {
-        // Find first marker1
-        ptr = static_cast<const uint8_t*>(memchr(ptr, marker1, end - ptr));
-        if (!ptr) break;
-        
-        // Check if next byte is marker2
-        if (ptr + 1 <= end && *(ptr + 1) == marker2) {
-            return ptr - data.data();
-        }
-        
-        ptr++;  // Continue search from next position
-    }
-    
-    return std::string::npos;
-}
 
 // Simple callback - just store data
-void video_callback(const uint8_t* data, size_t size, bool vsync) {
+void video_callback(const uint8_t* data, size_t size, bool vsync, uint8_t count) {
     std::lock_guard<std::mutex> lock(queue_mutex);
 
     ImageBuffer pack;
     pack.buffer.assign(data, data + size);
     pack.can_decode = vsync;
+    pack.count = count;
 
     pack_buffer.push(pack);
 
     pack_buffer_cv_.notify_all();
 }
-
 
 
 #include <opencv2/opencv.hpp>
@@ -74,6 +52,7 @@ extern OSDMenu g_osd_menu;
 
 
 cv::Mat img;
+std::chrono::milliseconds duration = (std::chrono::milliseconds)0;
 void img_decode(bool img_decode) {
     auto decode_start = std::chrono::steady_clock::now();
 
@@ -86,6 +65,7 @@ void img_decode(bool img_decode) {
     if (!window_initialized) {
         cv::namedWindow("Live", cv::WINDOW_AUTOSIZE);
         cv::setWindowProperty("Live", cv::WND_PROP_FULLSCREEN, cv::WINDOW_FULLSCREEN);
+        cv::setWindowProperty("Live", cv::WND_PROP_VSYNC, 0);
         window_initialized = true;
     }
     
@@ -133,55 +113,65 @@ void img_decode(bool img_decode) {
     if (&g_osd_menu != nullptr) {
         g_osd_menu.draw(display, sw, sh);
     }
-    
-    auto decode_end = std::chrono::steady_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(decode_end-decode_start);
+
     cv::putText(display, cv::format("Delay: %d",duration), 
                 cv::Point(180, 30), cv::FONT_HERSHEY_SIMPLEX, 0.7, 
                 cv::Scalar(0, 255, 0), 2);
 
     cv::imshow("Live", display);
     cv::waitKey(1);
+
+    auto decode_end = std::chrono::steady_clock::now();
+    duration = std::chrono::duration_cast<std::chrono::milliseconds>(decode_end-decode_start);
 }
 
 // Main decoder loop
 void video_decoder_loop() {
+    setenv("vblank_mode", "0", 1);
+    setenv("__GL_SYNC_TO_VBLANK", "0", 1);
+
     running = true;
 
-    std::vector<uint8_t> current_packet;  // Buffer for current packet
+    ImageBuffer current_packet;  // Buffer for current packet
+    uint8_t counter = 0;
     while (running) {
         {
             // Lock scope - only for queue operations
             std::unique_lock<std::mutex> lock(queue_mutex);
-            pack_buffer_cv_.wait_for(lock, std::chrono::milliseconds(34), []{ 
+            pack_buffer_cv_.wait_for(lock, std::chrono::milliseconds(200), []{ 
                 return !pack_buffer.empty() || !running; 
             });
             
             if(!running) break;
 
             if (!pack_buffer.empty()) {
-                // Copy the data while holding the lock
-                current_packet = std::move(pack_buffer.front().buffer);
+                current_packet.buffer = std::move(pack_buffer.front().buffer);
+                current_packet.count = pack_buffer.front().count;
+                current_packet.can_decode = pack_buffer.front().can_decode;
                 pack_buffer.pop();
             }
         }
 
-        if(!running) break;
+        if (!current_packet.buffer.empty()) {
+            if ((current_packet.count == 0) && (!img_buffer.empty())){//missing vsync broken img
+                img_buffer.clear();
+                counter = 0;
+                printf("missing vsync \n");
+            }
+            // Append current packet to image buffer
+            img_buffer.insert(img_buffer.end(), current_packet.buffer.begin(), current_packet.buffer.end());
+            counter++;
+            if (current_packet.can_decode){
+                if (counter == (current_packet.count+1)){
+                  img_decode(true);
+                } else {
+                  printf("broken img %d  %d\n", counter, current_packet.count+1);
+                }
 
-        // Process the packet without holding the lock
-        if (!current_packet.empty()) {
-            // Look for start marker (0xFFD8)
-            size_t start_pos = find_marker(current_packet, 0xFF, 0xD8);
-            if (start_pos == 0) {
-                img_decode(true);
+                counter = 0;
                 img_buffer.clear();
             }
-            
-            // Append current packet to image buffer
-            img_buffer.insert(
-                img_buffer.end(),
-                current_packet.begin(),
-                current_packet.end());
+            current_packet.buffer.clear();
         } else {
             img_decode(false);
         }

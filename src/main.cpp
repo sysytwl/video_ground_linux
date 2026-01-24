@@ -7,7 +7,6 @@
 #include <vector>
 #include <algorithm>
 #include "packet_sniffer.h"
-#include "packet_injector.h"
 #include "gamepad_osd.h"
 #include "video_decoder.h"
 

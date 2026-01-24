@@ -13,16 +13,17 @@ find_package(PkgConfig REQUIRED)
 find_package(OpenCV REQUIRED) # Find OpenCV
 include_directories(${OpenCV_INCLUDE_DIRS})
 
-find_package(SDL2 REQUIRED)#SDL2
-include_directories(${SDL2_INCLUDE_DIRS})
+# find_package(SDL2 REQUIRED)#SDL2
+# include_directories(${SDL2_INCLUDE_DIRS})
 
-pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
-    libavformat
-    libavcodec
-    libavutil
-    libavfilter
-    libswscale
-)
+# pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
+#     libavformat
+#     libavcodec
+#     libavutil
+#     libavfilter
+#     libswscale
+# )
+
 find_package(PCAP QUIET)
 if(NOT Pcap_FOUND)
     # Option 2: Manual search if the module fails

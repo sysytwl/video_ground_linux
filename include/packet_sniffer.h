@@ -5,19 +5,21 @@
 #include <map>
 #include <pcap.h>
 #include <atomic>
+
 #include "wifi_packet.h"
 #include "packet_pool.h"
+#include "gamepad_osd.h"
 
 class PacketSniffer {
 private:
     pcap_t* handle_;
     PacketPool packet_pool_;
-    
+
     std::string target_mac_;
     bool filter_by_mac_;
     int link_type_;
     std::atomic<bool> running_;
-    
+
     // Command line arguments
     std::map<std::string, std::string> args_;
 
@@ -25,16 +27,15 @@ private:
     std::vector<pcap_t*> multi_handles_;
     std::vector<std::thread> capture_threads_;
     std::vector<std::string> interfaces_;
-    
-    void single_capture_thread(pcap_t* handle, int packet_count);
-    static void pcap_callback_multi(u_char* user_data, 
-                                    const struct pcap_pkthdr* pkthdr, 
-                                    const u_char* packet);
 
-    // Helper methods
+    //injection
+    void prepare_radiotap_header();
+    std::vector<uint8_t> RADIOTAP_HEADER;
+    uint8_t _injection_rate = 1; //mbps
+
+    void single_capture_thread(pcap_t* handle, int packet_count);
     bool initialize_pcap(std::string interface);
     bool setup_filter(uint8_t cases,std::string filter_exp);
-    void parse_args(int argc, char* argv[]);
     void packet_handler(const struct pcap_pkthdr* pkthdr, const u_char* packet);
     
 public:
@@ -43,6 +44,7 @@ public:
     
     bool initialize(std::string interface,uint8_t cases,std::string filter_exp);
     void start_capture(int packet_count);
+    void injection_loop();
     void stop_capture();
 
     // Static callback for pcap_loop

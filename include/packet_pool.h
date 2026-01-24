@@ -16,7 +16,7 @@
 #define FEC_N 7
 
 // C-style callback for decoded data
-typedef void (*PacketCallback)(const uint8_t* data, size_t size, bool vsync);
+typedef void (*PacketCallback)(const uint8_t* data, size_t size, bool vsync, uint8_t count);
 
 class PacketPool {
 private:
@@ -133,9 +133,7 @@ public:
     void set_buffer_size(size_t new_size);
 
     // Start/stop processing with specified number of decoder threads
-    void start_processing(int num_threads = 1, 
-                         PacketCallback callback = nullptr,
-                         void* user_data = nullptr);
+    void start_processing(int num_threads = 1, PacketCallback callback = nullptr);
     void stop_processing();
 
     // Statistics

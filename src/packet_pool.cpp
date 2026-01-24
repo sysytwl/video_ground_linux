@@ -38,37 +38,20 @@ void close_logger() {
     }
 }
 
-uint32_t calculate_fcs(const uint8_t *data, size_t len) {
-    uint32_t crc = 0xFFFFFFFF;
+// int verify_fcs(const uint8_t *frame, size_t total_len) {
+//     if (total_len < 4) return 0;  // Frame too short for FCS
     
-    for (size_t i = 0; i < len; i++) {
-        crc ^= data[i];
-        for (int j = 0; j < 8; j++) {
-            if (crc & 1) {
-                crc = (crc >> 1) ^ 0xEDB88320;
-            } else {
-                crc >>= 1;
-            }
-        }
-    }
+//     size_t data_len = total_len - 4;
+//     uint32_t expected_fcs = calculate_fcs(frame, data_len);
     
-    return ~crc;
-}
-
-int verify_fcs(const uint8_t *frame, size_t total_len) {
-    if (total_len < 4) return 0;  // Frame too short for FCS
+//     // Extract received FCS (little-endian)
+//     uint32_t received_fcs = (frame[data_len + 3] << 24) |
+//                            (frame[data_len + 2] << 16) |
+//                            (frame[data_len + 1] << 8) |
+//                            frame[data_len];
     
-    size_t data_len = total_len - 4;
-    uint32_t expected_fcs = calculate_fcs(frame, data_len);
-    
-    // Extract received FCS (little-endian)
-    uint32_t received_fcs = (frame[data_len + 3] << 24) |
-                           (frame[data_len + 2] << 16) |
-                           (frame[data_len + 1] << 8) |
-                           frame[data_len];
-    
-    return expected_fcs == received_fcs;
-}
+//     return expected_fcs == received_fcs;
+// }
 
 
 
@@ -101,8 +84,6 @@ bool PacketPool::add_packet(const uint8_t* data, size_t data_size) {
     packet_buffer_.push(std::vector<uint8_t>(data, data+data_size));
     packets_received_++;
 
-    //printf("add pack: %d   ", packet_buffer_.size());
-
     // Notify decoder thread
     packet_available_cv_.notify_one();
     return true;
@@ -116,7 +97,6 @@ void PacketPool::set_buffer_size(size_t new_size) {
 void PacketPool::process_active_frame() {
     // Check if we can decode
     if (active_frame_.can_decode()) {
-        log_message("    true \n");
         // Initialize FEC if needed
         if (fec_type == nullptr) {
             fec_decoder.init_fec();
@@ -159,9 +139,10 @@ void PacketPool::process_active_frame() {
         // Output all K packets
         for (int i = 0; i < FEC_K; i++) {
             callback_(
-                active_frame_.block_data[i], 
-                active_frame_.data_size, 
-                active_frame_.frame_index == 1 && i==0
+                active_frame_.block_data[i] + Video_Header, 
+                active_frame_.data_size - Video_Header, 
+                ((Air2Ground_Video_Packet*)active_frame_.block_data[i])->vsync,
+                ((Air2Ground_Video_Packet*)active_frame_.block_data[i])->img_count
             );
         }
 
@@ -193,9 +174,11 @@ void PacketPool::flush_stale_frame() {
     for (int i = 0; i < FEC_K; i++) {
         if (active_frame_.block_status[i]) {
             callback_(
-                active_frame_.block_data[i], 
-                active_frame_.data_size, 
-                active_frame_.frame_index==1 && i==0);
+                active_frame_.block_data[i]+ Video_Header,
+                active_frame_.data_size - Video_Header, 
+                ((Air2Ground_Video_Packet*)active_frame_.block_data[i])->vsync,
+                ((Air2Ground_Video_Packet*)active_frame_.block_data[i])->img_count
+            );
             available_packets++;
         }
     }
@@ -272,18 +255,6 @@ void PacketPool::decoder_thread_func(int id) {
 
         IEEE80211_MacHeader *IEEE_HEADER = (IEEE80211_MacHeader*)(packet.data() + radiotap_header.max_length);
 
-        // Log packet info if in debug mode
-        // std::cout << "WiFi Packet - ";
-        // std::cout << WiFiPacket::get_frame_type_string(info.frame_type, info.frame_subtype);
-        // std::cout << " Src: " << info.src_mac;
-        // std::cout << " Dst: " << info.dst_mac;
-        // std::cout << " BSSID: " << info.bssid_mac;
-        //std::cout << " Size: " << pkthdr->len<< " bytes";
-        // std::cout << " Signal: " << info.radiotapinfo.signal_dbm << "dbm";
-        // std::cout << " Noise: " << info.radiotapinfo.noise_dbm << "dbm";
-        // std::cout << " Channel: " << info.radiotapinfo.channel_freq << "Hz";
-        // std::cout << " DataRate: " << info.radiotapinfo.data_rate << "Mbps" << std::endl;        
-
         if (IEEE_HEADER->fc.type != 0b10){ //not data type
             std::cout << "wrong frame type, plz set the filter!" << std::endl;
             continue;
@@ -296,11 +267,15 @@ void PacketPool::decoder_thread_func(int id) {
         }
 
         if (header->type == Air2Ground_Header::Type::Video) {
-            Air2Ground_Video_Packet* video_header = (Air2Ground_Video_Packet*)header;
-            
-            uint32_t frame_index = video_header->frame_index;
-            uint8_t part_index = video_header->part_index;
-            size_t data_size = packet.size() - radiotap_header.max_length - WLAN_IEEE80211_HEADER_SIZE - Air2Ground_Video_Packet_Header_Size - (FCS ? 4 : 0);
+
+            uint32_t frame_index = header->frame_index;
+            uint8_t part_index = header->part_index;
+            size_t data_size = 
+                packet.size() 
+                - radiotap_header.max_length 
+                - WLAN_IEEE80211_HEADER_SIZE 
+                - Air2Ground_Header_Size 
+                - (FCS ? 4 : 0);
 
             // Check if this is for the current active frame
             if (active_frame_.frame_index == 0 || active_frame_.frame_index != frame_index) {
@@ -310,8 +285,6 @@ void PacketPool::decoder_thread_func(int id) {
                     process_active_frame();
                 }
 
-                // Start new frame
-                log_message("frame: %d  ", frame_index);
                 active_frame_.reset(frame_index);
                 active_frame_.data_size = data_size;
             }
@@ -333,12 +306,10 @@ void PacketPool::decoder_thread_func(int id) {
             // Store packet in active frame
             memcpy(
                 active_frame_.block_data[part_index],
-                (uint8_t*) video_header + Air2Ground_Video_Packet_Header_Size,
+                (uint8_t*) header + Air2Ground_Header_Size,
                 data_size
             );
             active_frame_.block_status[part_index] = true;
-
-            log_message(" part: %d    ", part_index);
         }
 
         packet.clear();
@@ -356,14 +327,11 @@ void PacketPool::decoder_thread_func(int id) {
     printf("Decoder thread %d stopped\n", id);
 }
 
-void PacketPool::start_processing(int num_threads, 
-                                 PacketCallback callback, 
-                                 void* user_data) {
+void PacketPool::start_processing(int num_threads, PacketCallback callback) {
     if (running_) return;
     
     running_ = true;
     callback_ = callback;
-    callback_user_data_ = user_data;
     active_frame_.init(FEC_N);
     
     // Start decoder threads
