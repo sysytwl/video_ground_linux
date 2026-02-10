@@ -9,7 +9,7 @@
 
 
 
-PacketSniffer::PacketSniffer() 
+PacketSniffer::PacketSniffer()
     : handle_(nullptr), filter_by_mac_(false), link_type_(0), running_(false) {
 }
 
@@ -25,12 +25,12 @@ bool PacketSniffer::initialize(std::string interface,uint8_t cases,std::string f
     if (!initialize_pcap(interface)) {
         return false;
     }
-    
+
     //Set up filter
     if (!setup_filter(cases,filter_exp)) {
        return false;
     }
-    
+
     return true;
 }
 
@@ -68,7 +68,7 @@ int set_wifi_channel(const char *interface, int channel) {
 
 bool PacketSniffer::initialize_pcap(std::string interface) {
     char errbuf[PCAP_ERRBUF_SIZE];
-    
+
     // Method 1: Modern API with immediate mode
     handle_ = pcap_create(interface.c_str(), errbuf);
     if (handle_) {
@@ -80,16 +80,16 @@ bool PacketSniffer::initialize_pcap(std::string interface) {
             return false;
         }
 
-        if (pcap_set_rfmon(handle_, 1) != 0) {
-            fprintf(stderr, "设置监控模式失败: %s\n", pcap_geterr(handle_));
-            pcap_close(handle_);
-            return false;
-        }
+        // if (pcap_set_rfmon(handle_, 1) != 0) {
+        //     fprintf(stderr, "设置监控模式失败: %s\n", pcap_geterr(handle_));
+        //     pcap_close(handle_);
+        //     return false;
+        // }
 
         // WiFi works better with small buffer and short timeout
         pcap_set_buffer_size(handle_, 128 * 1024);  // 128KB
         pcap_set_timeout(handle_, 10);  // 10ms for WiFi
-        
+
         // Try immediate mode first
         if (pcap_set_immediate_mode(handle_, 1) == 0) {
             printf("Immediate mode enabled\n");
@@ -107,7 +107,7 @@ bool PacketSniffer::initialize_pcap(std::string interface) {
             printf("Using traditional pcap_open_live with 10ms timeout\n");
             handle_ = pcap_open_live(interface.c_str(), BUFSIZ, 1, 10, errbuf);
         }
-        
+
     }
 
 
@@ -117,7 +117,7 @@ bool PacketSniffer::initialize_pcap(std::string interface) {
         std::cerr << "1. Interface " << interface << " exists" << std::endl;
         std::cerr << "2. Interface is in monitor mode" << std::endl;
         std::cerr << "3. You have root privileges" << std::endl;
-        
+
         // Try to list available devices
         pcap_if_t *alldevs;
         if (pcap_findalldevs(&alldevs, errbuf) == 0) {
@@ -133,7 +133,7 @@ bool PacketSniffer::initialize_pcap(std::string interface) {
         }
         return false;
     }
-    
+
     // Get link layer type
     link_type_ = pcap_datalink(handle_);
     std::cout << "Link type: " << link_type_ << " (";
@@ -157,44 +157,44 @@ bool PacketSniffer::initialize_pcap(std::string interface) {
 
 bool PacketSniffer::initialize_multi(const std::vector<std::string>& interfaces,uint8_t cases, const std::string& filter_exp) {
     interfaces_ = interfaces;
-    
+
     for (const auto& interface : interfaces) {
         char errbuf[PCAP_ERRBUF_SIZE];
         pcap_t* handle = pcap_create(interface.c_str(), errbuf);
-        
+
         if (handle) {
             pcap_set_buffer_size(handle, 128 * 1024);
             pcap_set_timeout(handle, 10);
             pcap_set_promisc(handle, 1);
             pcap_set_snaplen(handle, BUFSIZ);
-            
+
             if (pcap_activate(handle) != 0) {
                 pcap_close(handle);
                 handle = pcap_open_live(interface.c_str(), BUFSIZ, 1, 10, errbuf);
             }
-            
+
             if (handle) {
                 // Setup filter for this interface
                 struct bpf_program fp;
                 std::string actual_filter = filter_exp;
-                
+
                 if (cases == 1 && !filter_exp.empty()) {
                     WiFiPacket::remove_char(actual_filter, ':');
                     actual_filter = "wlan addr2 " + actual_filter;
                 }
-                
-                if (pcap_compile(handle, &fp, actual_filter.c_str(), 0, 
+
+                if (pcap_compile(handle, &fp, actual_filter.c_str(), 0,
                                  PCAP_NETMASK_UNKNOWN) == 0) {
                     pcap_setfilter(handle, &fp);
                     pcap_freecode(&fp);
                 }
-                
+
                 multi_handles_.push_back(handle);
                 std::cout << "Initialized interface: " << interface << std::endl;
             }
         }
     }
-    
+
     return !multi_handles_.empty();
 }
 
@@ -202,15 +202,15 @@ bool PacketSniffer::initialize_multi(const std::vector<std::string>& interfaces,
 void PacketSniffer::start_multi_capture(int packet_count) {
     // Start packet pool processing
     packet_pool_.start_processing(1, video_callback);
-    
-    std::cout << "\nStarting multi-interface capture on " 
+
+    std::cout << "\nStarting multi-interface capture on "
               << multi_handles_.size() << " interfaces..." << std::endl;
-    
+
     running_ = true;
-    
+
     // Start a capture thread for each interface
     for (auto handle : multi_handles_) {
-        capture_threads_.emplace_back(&PacketSniffer::single_capture_thread, 
+        capture_threads_.emplace_back(&PacketSniffer::single_capture_thread,
                                        this, handle, packet_count);
     }
 }
@@ -219,7 +219,7 @@ void PacketSniffer::single_capture_thread(pcap_t* handle, int packet_count) {
     int result = pcap_loop(handle, packet_count,
                           PacketSniffer::pcap_callback,
                           (u_char*)this);
-    
+
     if (result == -1) {
         std::cerr << "Error in pcap_loop: " << pcap_geterr(handle) << std::endl;
     }
@@ -227,12 +227,12 @@ void PacketSniffer::single_capture_thread(pcap_t* handle, int packet_count) {
 
 void PacketSniffer::stop_multi_capture() {
     running_ = false;
-    
+
     // Break all pcap loops
     for (auto handle : multi_handles_) {
         pcap_breakloop(handle);
     }
-    
+
     // Wait for all threads
     for (auto& thread : capture_threads_) {
         if (thread.joinable()) {
@@ -240,13 +240,13 @@ void PacketSniffer::stop_multi_capture() {
         }
     }
     capture_threads_.clear();
-    
+
     // Close all handles
     for (auto handle : multi_handles_) {
         pcap_close(handle);
     }
     multi_handles_.clear();
-    
+
     // Stop packet pool
     packet_pool_.stop_processing();
 }
@@ -277,7 +277,7 @@ bool PacketSniffer::setup_filter(uint8_t cases,std::string filter_exp) {
             std::cerr << "Could not parse filter: " << pcap_geterr(handle_) << std::endl;
             return false;
         }
-        
+
         if (pcap_setfilter(handle_, &fp) == -1) {
             std::cerr << "Could not install filter: " << pcap_geterr(handle_) << std::endl;
             return false;
@@ -285,7 +285,7 @@ bool PacketSniffer::setup_filter(uint8_t cases,std::string filter_exp) {
         std::cout << "WiFi BPF filter set to: " << mac_filter << std::endl;
         pcap_freecode(&fp);
     }
-    
+
     return true;
 }
 
@@ -337,20 +337,13 @@ void PacketSniffer::pcap_callback(u_char* user_data, const struct pcap_pkthdr* p
 }
 
 #include "ieee80211_radiotap.h"
-// 信道频率表（2.4 GHz频段）
-#define CH1_FREQ  2412  // 信道1: 2.412 GHz
-#define CH6_FREQ  2437  // 信道6: 2.437 GHz
-#define CH11_FREQ 2462  // 信道11: 2.462 GHz
-#define CH13_FREQ 2472  // 信道13: 2.472 GHz
 
-static void radiotap_add_u8(uint8_t*& dst, size_t& idx, uint8_t data)
-{
+static void radiotap_add_u8(uint8_t*& dst, size_t& idx, uint8_t data){
     *dst++ = data;
     idx++;
 }
 
-static void radiotap_add_u16(uint8_t*& dst, size_t& idx, uint16_t data)
-{
+static void radiotap_add_u16(uint8_t*& dst, size_t& idx, uint16_t data){
     if ((idx & 1) == 1) //not aligned, pad first
     {
         radiotap_add_u8(dst, idx, 0);
@@ -361,50 +354,42 @@ static void radiotap_add_u16(uint8_t*& dst, size_t& idx, uint16_t data)
 }
 
 void PacketSniffer::prepare_radiotap_header(){
+    RADIOTAP_HEADER.clear();
     RADIOTAP_HEADER.resize(1024);
     ieee80211_radiotap_header& hdr = reinterpret_cast<ieee80211_radiotap_header& >(*RADIOTAP_HEADER.data());
     hdr.it_version = 0;
-    hdr.it_present = 0
-        //| (1 << IEEE80211_RADIOTAP_RATE)
-        | (1 << IEEE80211_RADIOTAP_TX_FLAGS)
-        //| (1 << IEEE80211_RADIOTAP_RTS_RETRIES)
-        | (1 << IEEE80211_RADIOTAP_DATA_RETRIES)
-        //| (1 << IEEE80211_RADIOTAP_CHANNEL)
-        | (1 << IEEE80211_RADIOTAP_MCS);
+    hdr.it_present = 0;
 
     auto* dst = RADIOTAP_HEADER.data() + sizeof(ieee80211_radiotap_header);
     size_t idx = dst - RADIOTAP_HEADER.data();
 
-    if (hdr.it_present & (1 << IEEE80211_RADIOTAP_RATE))
-        radiotap_add_u8(dst, idx, _injection_rate*2);//500kpbs
-    if (hdr.it_present & (1 << IEEE80211_RADIOTAP_TX_FLAGS))
-        radiotap_add_u16(dst, idx, IEEE80211_RADIOTAP_F_TX_NOACK); //used to be 0x18
-    if (hdr.it_present & (1 << IEEE80211_RADIOTAP_RTS_RETRIES))
-        radiotap_add_u8(dst, idx, 0x0);
-    if (hdr.it_present & (1 << IEEE80211_RADIOTAP_DATA_RETRIES))
-        radiotap_add_u8(dst, idx, 0x0);
-    if (hdr.it_present & (1 << IEEE80211_RADIOTAP_MCS))
-    {
-        radiotap_add_u8(dst, idx, IEEE80211_RADIOTAP_MCS_HAVE_MCS | IEEE80211_RADIOTAP_MCS_HAVE_BW | IEEE80211_RADIOTAP_MCS_HAVE_GI ); // short gI
-        radiotap_add_u8(dst, idx, IEEE80211_RADIOTAP_MCS_BW_20 );  //HT20
-        radiotap_add_u8(dst, idx, 1);  //MCS Index 1 13M
-    }
-    if (hdr.it_present & (1 << IEEE80211_RADIOTAP_CHANNEL))
-    {
-        radiotap_add_u16(dst, idx, CH13_FREQ);
-        radiotap_add_u16(dst, idx, 0);
-    }
+    //| (1 << IEEE80211_RADIOTAP_RATE)
+    //radiotap_add_u8(dst, idx, _injection_rate*2);//500kpbs
+    hdr.it_present |= (1 << IEEE80211_RADIOTAP_TX_FLAGS);
+    radiotap_add_u16(dst, idx, IEEE80211_RADIOTAP_F_TX_NOACK); //used to be 0x18
+    //| (1 << IEEE80211_RADIOTAP_RTS_RETRIES)
+    //radiotap_add_u8(dst, idx, 0x0);
+    hdr.it_present |= (1 << IEEE80211_RADIOTAP_DATA_RETRIES);
+    radiotap_add_u8(dst, idx, 0x0);
+    //| (1 << IEEE80211_RADIOTAP_CHANNEL)
+    // radiotap_add_u16(dst, idx, CH13_FREQ);
+    // radiotap_add_u16(dst, idx, 0);
+    hdr.it_present |= (1 << IEEE80211_RADIOTAP_MCS);
+    radiotap_add_u8(dst, idx, IEEE80211_RADIOTAP_MCS_HAVE_MCS | IEEE80211_RADIOTAP_MCS_HAVE_BW | IEEE80211_RADIOTAP_MCS_HAVE_GI ); // short gI
+    radiotap_add_u8(dst, idx, IEEE80211_RADIOTAP_MCS_BW_20 );  //HT20
+    radiotap_add_u8(dst, idx, 0);  //MCS Index 1 13M
 
     //finish it
     hdr.it_len = static_cast<__le16>(idx);
     RADIOTAP_HEADER.resize(idx);
+    std::cout << idx;
 }
 
 #include "wifi_inj_sin.h"
 
 uint32_t calculate_fcs(const uint8_t *data, size_t len) {
     uint32_t crc = 0xFFFFFFFF;
-    
+
     for (size_t i = 0; i < len; i++) {
         crc ^= data[i];
         for (int j = 0; j < 8; j++) {
@@ -415,7 +400,7 @@ uint32_t calculate_fcs(const uint8_t *data, size_t len) {
             }
         }
     }
-    
+
     return ~crc;
 }
 
@@ -426,24 +411,35 @@ void PacketSniffer::injection_loop() {
     const int injection_rate_hz = 60;
     const auto injection_interval = std::chrono::milliseconds(1000 / injection_rate_hz);
 
-    std::vector<uint8_t> injection_packet;
+
+    uint8_t* injection_packet;
+    injection_packet = (uint8_t*)malloc(1600);
+    Ground2Air_Data_Packet payload;
+    payload.packet_version = PACKET_VERSION;
     while (running_) {
-        injection_packet.clear();
+        size_t packet_size = 0;
 
         // Add Radiotap header
         prepare_radiotap_header();
-        injection_packet.insert(injection_packet.end(), RADIOTAP_HEADER.begin(), RADIOTAP_HEADER.end());
+        memcpy(injection_packet,RADIOTAP_HEADER.data(),RADIOTAP_HEADER.size());
+        packet_size += RADIOTAP_HEADER.size();
 
         // IEEE header
-        injection_packet.insert(injection_packet.end(), WLAN_IEEE_HEADER_AIR2GROUND, WLAN_IEEE_HEADER_AIR2GROUND+WLAN_IEEE_HEADER_SIZE);
+        memcpy(injection_packet+packet_size,&WLAN_IEEE_HEADER_GROUND2AIR[0], WLAN_IEEE_HEADER_SIZE);
+        packet_size += WLAN_IEEE_HEADER_SIZE;
 
         //DATA test payload
-        //GamepadState state = gamepad.get_state();
-        //uint16_t controller_channels[12] = {0};
-        injection_packet.insert(injection_packet.end(), WLAN_IEEE_HEADER_AIR2GROUND, WLAN_IEEE_HEADER_AIR2GROUND+WLAN_IEEE_HEADER_SIZE);
+        payload.type = Ground2Air_Data_Packet::Type::Telemetry;
+        GamepadState state = gamepad.get_state();
+        payload.channel_data[0] = state.left_stick_x + 32767;
+        payload.channel_data[1] = state.left_stick_y + 32767;
+        payload.channel_data[2] = state.right_stick_x + 32767;
+        payload.channel_data[3] = state.right_stick_y + 32767;
+        payload.channel_data_1[0] = 0;
+        memcpy(injection_packet+packet_size, &payload, sizeof(Ground2Air_Data_Packet));
+        packet_size += sizeof(Ground2Air_Data_Packet);
 
-        int result = pcap_inject(handle_, injection_packet.data(), injection_packet.size());
-        std::cout << "INJECTION RESULT: " << result << std::endl;
+        pcap_inject(handle_, injection_packet, packet_size);
 
         std::this_thread::sleep_for(injection_interval);
     }

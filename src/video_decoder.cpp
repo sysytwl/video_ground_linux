@@ -63,8 +63,10 @@ void img_decode(bool img_decode) {
     }
 
     if (!window_initialized) {
+        //cv::namedWindow("Live", cv::WINDOW_OPENGL);
         cv::namedWindow("Live", cv::WINDOW_AUTOSIZE);
-        cv::setWindowProperty("Live", cv::WND_PROP_FULLSCREEN, cv::WINDOW_FULLSCREEN);
+        //cv::setWindowProperty("Live", cv::WND_PROP_FULLSCREEN, cv::WINDOW_FULLSCREEN);
+        cv::setWindowProperty("Live", cv::WND_PROP_OPENGL , 1);
         cv::setWindowProperty("Live", cv::WND_PROP_VSYNC, 0);
         window_initialized = true;
     }
