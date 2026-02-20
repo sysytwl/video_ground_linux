@@ -1,15 +1,12 @@
 #include "video_decoder.h"
-#include <opencv2/opencv.hpp>
-#include <queue>
-#include <mutex>
-#include <condition_variable>
-#include <atomic>
-#include <vector>
-#include <algorithm>
+#include <turbojpeg.h>
 #include <iostream>
-#include <thread>
-#include <stddef.h>
 #include <cstring>
+#include "hud_overlay.h"
+#include "object_detector.h"
+#include "sdl_renderer.h"
+
+ObjectDetector object_detector;
 
 struct ImageBuffer {
     std::vector<uint8_t> buffer;
@@ -20,10 +17,13 @@ std::queue<ImageBuffer> pack_buffer;
 std::mutex queue_mutex;
 std::condition_variable pack_buffer_cv_;
 std::atomic<bool> running{true};
-std::vector<uint8_t> img_buffer;
 
+// Global queue for incoming packets (from packet pool)
+static std::queue<std::vector<uint8_t>> g_packet_queue;
+static std::mutex g_queue_mutex;
+static std::condition_variable g_queue_cv;
+static std::atomic<bool> g_running{true};
 
-// Simple callback - just store data
 void video_callback(const uint8_t* data, size_t size, bool vsync, uint8_t count) {
     std::lock_guard<std::mutex> lock(queue_mutex);
 
@@ -37,114 +37,95 @@ void video_callback(const uint8_t* data, size_t size, bool vsync, uint8_t count)
     pack_buffer_cv_.notify_all();
 }
 
-
-#include <opencv2/opencv.hpp>
-#include <chrono>
-#include <deque>
-
-const int MAX_FPS = 5;
-std::deque<std::chrono::steady_clock::time_point> timestamps;
-bool window_initialized = false;
-
-#include "gamepad_osd.h"
-
-extern OSDMenu g_osd_menu; 
-
-
-cv::Mat img;
-std::chrono::milliseconds duration = (std::chrono::milliseconds)0;
-void img_decode(bool img_decode) {
-    auto decode_start = std::chrono::steady_clock::now();
-
-    if (img_decode){
-        if (img_buffer.empty()) return;
-        img = cv::imdecode(img_buffer, cv::IMREAD_COLOR);
-        if (img.empty()) return;
-    }
-
-    if (!window_initialized) {
-        //cv::namedWindow("Live", cv::WINDOW_OPENGL);
-        cv::namedWindow("Live", cv::WINDOW_AUTOSIZE);
-        //cv::setWindowProperty("Live", cv::WND_PROP_FULLSCREEN, cv::WINDOW_FULLSCREEN);
-        cv::setWindowProperty("Live", cv::WND_PROP_OPENGL , 1);
-        cv::setWindowProperty("Live", cv::WND_PROP_VSYNC, 0);
-        window_initialized = true;
-    }
-    
-    // Fast resize with aspect ratio
-    // Try to get actual screen resolution
-    // cv::Rect window_rect = cv::getWindowImageRect("Live Video");
-    // screen_width = window_rect.width;
-    // screen_height = window_rect.height;
-
-    int sw = 1280, sh = 800;
-    cv::Mat display = cv::Mat::zeros(sh, sw, CV_8UC3);
-
-    if (img_decode){
-        float scale = std::min((float)sw / img.cols, (float)sh / img.rows);
-        int nw = img.cols * scale, nh = img.rows * scale;
-        int xo = (sw - nw) / 2, yo = (sh - nh) / 2;
-        cv::resize(img, display(cv::Rect(xo, yo, nw, nh)), cv::Size(nw, nh));
-    }
-
-    // FPS calculation
-    auto now = std::chrono::steady_clock::now();
-    timestamps.push_back(now);
-    if (timestamps.size() > MAX_FPS) timestamps.pop_front();
-    
-    float fps = 0;
-    if (timestamps.size() >= 2) {
-        auto span = std::chrono::duration_cast<std::chrono::milliseconds>(
-            timestamps.back() - timestamps.front());
-        if (span.count() > 0) fps = (timestamps.size() - 1) * 1000.0f / span.count();
-    }
-    
-    // Draw red cross at screen center
-    int cx = sw / 2, cy = sh / 2, cs = 15;
-    cv::line(display, cv::Point(cx - cs, cy), cv::Point(cx + cs, cy), 
-             cv::Scalar(0, 0, 255), 2);
-    cv::line(display, cv::Point(cx, cy - cs), cv::Point(cx, cy + cs), 
-             cv::Scalar(0, 0, 255), 2);
-    
-    // Draw FPS (green)
-    cv::putText(display, cv::format("FPS: %.1f", fps), 
-                cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 0.7, 
-                cv::Scalar(0, 255, 0), 2);
-    
-    // Draw OSD menu - 添加空指针检查
-    if (&g_osd_menu != nullptr) {
-        g_osd_menu.draw(display, sw, sh);
-    }
-
-    cv::putText(display, cv::format("Delay: %d",duration), 
-                cv::Point(180, 30), cv::FONT_HERSHEY_SIMPLEX, 0.7, 
-                cv::Scalar(0, 255, 0), 2);
-
-    cv::imshow("Live", display);
-    cv::waitKey(1);
-
-    auto decode_end = std::chrono::steady_clock::now();
-    duration = std::chrono::duration_cast<std::chrono::milliseconds>(decode_end-decode_start);
+VideoDecoder::VideoDecoder() {
+    tj_instance_ = tjInitDecompress();
+    if (!tj_instance_) throw std::runtime_error("Failed to init libjpeg-turbo");
+    decoding_ = true;
+    decoder_thread_ = std::thread(&VideoDecoder::decoder_thread, this);
 }
 
-// Main decoder loop
-void video_decoder_loop() {
-    setenv("vblank_mode", "0", 1);
-    setenv("__GL_SYNC_TO_VBLANK", "0", 1);
+VideoDecoder::~VideoDecoder() {
+    decoding_ = false;
+    g_queue_cv.notify_all();
+    if (decoder_thread_.joinable()) decoder_thread_.join();
+    if (tj_instance_) tjDestroy(tj_instance_);
+}
 
-    running = true;
+void VideoDecoder::push_packet(const uint8_t* data, size_t size, bool vsync, uint8_t count) {
+    std::lock_guard<std::mutex> lock(g_queue_mutex);
+    g_packet_queue.push(std::vector<uint8_t>(data, data + size));
+    g_queue_cv.notify_one();
+}
+
+std::vector<uint8_t> VideoDecoder::get_decoded_frame() {
+    std::lock_guard<std::mutex> lock(frame_mutex_);
+    return current_frame_;
+}
+
+#include "gamepad_osd.h"
+extern OSDMenu g_osd_menu;
+void VideoDecoder::decoder_thread() {
+  // Initialize SDL
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) != 0) {
+        std::cerr << "SDL init failed: " << SDL_GetError() << std::endl;
+        return;
+    }
+    if (TTF_Init() != 0) {
+        std::cerr << "TTF init failed: " << TTF_GetError() << std::endl;
+        SDL_Quit();
+        return;
+    }
+
+    // Create window and renderer
+    const int screen_w = 1280, screen_h = 720;
+    SDL_Window* window = SDL_CreateWindow("WiFi Video Receiver",
+                                          SDL_WINDOWPOS_UNDEFINED,
+                                          SDL_WINDOWPOS_UNDEFINED,
+                                          screen_w, screen_h,
+                                          SDL_WINDOW_BORDERLESS);
+    if (!window) {
+        std::cerr << "Window creation failed: " << SDL_GetError() << std::endl;
+        TTF_Quit();
+        SDL_Quit();
+        return ;
+    }
+    SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
+    if (!renderer) {
+        std::cerr << "Renderer creation failed: " << SDL_GetError() << std::endl;
+        SDL_DestroyWindow(window);
+        TTF_Quit();
+        SDL_Quit();
+        return ;
+    }
+
+    // Load font
+    TTF_Font* font = TTF_OpenFont("./DejaVuSans.ttf", 18);
+    if (!font) font = TTF_OpenFont("/usr/share/fonts/TTF/DejaVuSans.ttf", 18);
+    if (!font) {
+        std::cerr << "Failed to load font: " << TTF_GetError() << std::endl;
+        // Continue without font? Fallback to no text.
+    }
+
+    // Load object detection model (optional)
+    if (!object_detector.loadModel("models/yolov4-tiny.weights", "models/yolov4-tiny.cfg")) {
+        std::cout << "Object detection model not loaded. Tracking disabled." << std::endl;
+    }
+
+    // Create helper objects
+    SDLRenderer sdl_renderer(renderer, font, screen_w, screen_h);
+    HUDOverlay hud(renderer, font);
+
 
     ImageBuffer current_packet;  // Buffer for current packet
     uint8_t counter = 0;
-    while (running) {
+    std::vector<uint8_t> img_buffer;
+    while (decoding_) {
         {
-            // Lock scope - only for queue operations
             std::unique_lock<std::mutex> lock(queue_mutex);
             pack_buffer_cv_.wait_for(lock, std::chrono::milliseconds(200), []{ 
                 return !pack_buffer.empty() || !running; 
             });
             
-            if(!running) break;
 
             if (!pack_buffer.empty()) {
                 current_packet.buffer = std::move(pack_buffer.front().buffer);
@@ -164,8 +145,51 @@ void video_decoder_loop() {
             img_buffer.insert(img_buffer.end(), current_packet.buffer.begin(), current_packet.buffer.end());
             counter++;
             if (current_packet.can_decode){
-                if (counter == (current_packet.count+1)){
-                  img_decode(true);
+                if (counter == (current_packet.count+1)){//able to decode
+                    // Decode JPEG using libjpeg-turbo
+                    int width, height, subsamp;
+                    if (tjDecompressHeader2(tj_instance_, img_buffer.data(), img_buffer.size(), &width, &height, &subsamp) != 0) {
+                        std::cerr << "JPEG header decode failed: " << tjGetErrorStr() << std::endl;
+                        continue;
+                    }
+
+                    std::vector<uint8_t> rgb(width * height * 3);
+                    if (tjDecompress2(tj_instance_, img_buffer.data(), img_buffer.size(), rgb.data(), width, 0, height, TJPF_RGB, TJFLAG_FASTDCT) != 0) {
+                        std::cerr << "JPEG decode failed: " << tjGetErrorStr() << std::endl;
+                        //continue;
+                    }
+
+                    // Get decoded frame
+                        // Convert to OpenCV Mat for processing
+                        cv::Mat cv_frame(height, width, CV_8UC3, rgb.data());
+
+                        // Object detection (every few frames)
+                        static int frame_counter = 0;
+                        if (++frame_counter % 5 == 0) {
+                            //auto objects = object_detector.detect(cv_frame);
+                            // TODO: draw bounding boxes if enabled
+                        }
+
+                        // Simulate flight data (replace with real telemetry)
+                        static float time = 0;
+                        time += 0.016f;
+                        float speed = 100 + 20*sin(time*0.5f);
+                        float alt = 200 + 30*sin(time*0.3f);
+                        float heading = fmod(time*10, 360);
+                        float pitch = 5*sin(time*0.8f);
+                        float roll = 10*sin(time*0.6f);
+                        float pred_speed = speed + 5;
+                        float pred_alt = alt + 10;
+                        float pred_heading = heading + 2;
+
+                        hud.updateFlightData(speed, alt, heading, pitch, roll,pred_speed, pred_alt, pred_heading);
+                        hud.setConfig(g_osd_menu.getHUDConfig());
+
+                        // Render frame
+                        sdl_renderer.render_frame(rgb, width, height);
+                        hud.render(screen_w, screen_h);
+                        g_osd_menu.draw(renderer, width, height, font);
+                        SDL_RenderPresent(renderer);
                 } else {
                   printf("broken img %d  %d\n", counter, current_packet.count+1);
                 }
@@ -175,13 +199,31 @@ void video_decoder_loop() {
             }
             current_packet.buffer.clear();
         } else {
-            img_decode(false);
+            // Show "Waiting for video"
+            if (font) {
+                SDL_Color white = {255,255,255,255};
+                SDL_Surface* surf = TTF_RenderText_Solid(font, "Waiting for video...", white);
+                if (surf) {
+                    SDL_Texture* tex = SDL_CreateTextureFromSurface(renderer, surf);
+                    SDL_Rect dst = {screen_w/2 - surf->w/2, screen_h/2 - surf->h/2, surf->w, surf->h};
+                    SDL_RenderCopy(renderer, tex, NULL, &dst);
+                    SDL_DestroyTexture(tex);
+                    SDL_FreeSurface(surf);
+                }
+            }
+            g_osd_menu.draw(renderer, screen_w, screen_h, font);
+            SDL_RenderPresent(renderer);
         }
     }
+
+    if (font) TTF_CloseFont(font);
+    SDL_DestroyRenderer(renderer);
+    SDL_DestroyWindow(window);
+    TTF_Quit();
+    SDL_Quit();
 }
 
 void video_stop() {
-    running = false;
-    pack_buffer_cv_.notify_all();
-    cv::destroyAllWindows();
+    g_running = false;
+    g_queue_cv.notify_all();
 }

@@ -304,7 +304,7 @@ void PacketSniffer::start_capture(int packet_count) {
 
     running_ = true;
 
-    _injection_thread = std::thread(&PacketSniffer::injection_loop, this);
+    // _injection_thread = std::thread(&PacketSniffer::injection_loop, this);
 
     // Start capture loop (block thread)
     int result = pcap_loop(handle_, packet_count,PacketSniffer::pcap_callback, (u_char*)this);
@@ -321,8 +321,8 @@ void PacketSniffer::start_capture(int packet_count) {
 void PacketSniffer::stop_capture() {
     running_ = false;
 
-    if(_injection_thread.joinable())
-        _injection_thread.join();
+    // if(_injection_thread.joinable())
+    //     _injection_thread.join();
 
     if (handle_) {
         pcap_breakloop(handle_);
@@ -382,7 +382,6 @@ void PacketSniffer::prepare_radiotap_header(){
     //finish it
     hdr.it_len = static_cast<__le16>(idx);
     RADIOTAP_HEADER.resize(idx);
-    std::cout << idx;
 }
 
 #include "wifi_inj_sin.h"
@@ -430,16 +429,16 @@ void PacketSniffer::injection_loop() {
 
         //DATA test payload
         payload.type = Ground2Air_Data_Packet::Type::Telemetry;
-        GamepadState state = gamepad.get_state();
-        payload.channel_data[0] = state.left_stick_x + 32767;
-        payload.channel_data[1] = state.left_stick_y + 32767;
-        payload.channel_data[2] = state.right_stick_x + 32767;
-        payload.channel_data[3] = state.right_stick_y + 32767;
+        gamepad.update();
+        payload.channel_data[0] = 1000+66*(gamepad.get_axis(2) + 32767);
+        payload.channel_data[1] =  1000+66*(gamepad.get_axis(3) + 32767);
+        payload.channel_data[2] =  1000+66*(gamepad.get_axis(0) + 32767);
+        payload.channel_data[3] =  1000+66*(gamepad.get_axis(1) + 32767);
         payload.channel_data_1[0] = 0;
         memcpy(injection_packet+packet_size, &payload, sizeof(Ground2Air_Data_Packet));
         packet_size += sizeof(Ground2Air_Data_Packet);
 
-        pcap_inject(handle_, injection_packet, packet_size);
+        //pcap_inject(handle_, injection_packet, packet_size);
 
         std::this_thread::sleep_for(injection_interval);
     }

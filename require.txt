@@ -8,3 +8,41 @@ linux-api-headers
 base-devel
 //ffmpeg
 vtk   libvtk9-dev
+
+sudo apt update
+sudo apt install build-essential cmake libpcap-dev libopencv-dev libsdl2-dev \
+                 libsdl2-image-dev libsdl2-ttf-dev libsdl2-gfx-dev libturbojpeg0-dev
+
+sudo pacman -S base-devel cmake libpcap opencv sdl2 sdl2_image sdl2_ttf sdl2_gfx libjpeg-turbo
+
+WiFiVideoReceiver/
+├── CMakeLists.txt
+├── include/
+│   ├── gamepad_osd.h
+│   ├── hud_overlay.h
+│   ├── object_detector.h
+│   ├── sdl_renderer.h
+│   ├── video_decoder.h
+│   ├── packet_pool.h
+│   ├── packet_sniffer.h
+│   ├── wifi_packet.h
+│   ├── radiotap.h
+│   ├── ieee80211_radiotap.h
+│   └── global_v.h
+├── src/
+│   ├── main.cpp
+│   ├── gamepad_osd.cpp
+│   ├── hud_overlay.cpp
+│   ├── object_detector.cpp
+│   ├── sdl_renderer.cpp
+│   ├── video_decoder.cpp
+│   ├── packet_pool.cpp
+│   ├── packet_sniffer.cpp
+│   ├── wifi_packet.cpp
+│   └── radiotap.cpp
+├── lib/
+│   ├── ESP32_WiFi_Injection_Sinffer/   (your existing submodule)
+│   └── rs_fec/                          (your existing submodule)
+└── models/                               (for object detection)
+    └── yolov4-tiny.cfg
+    └── yolov4-tiny.weights

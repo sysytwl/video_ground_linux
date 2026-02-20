@@ -1,114 +1,41 @@
 #include "gamepad_osd.h"
 #include <iostream>
-#include <algorithm>
 
-// GamepadHandler implementation
 GamepadHandler::GamepadHandler() {}
 
 GamepadHandler::~GamepadHandler() {
-    stop();
-    if (js_fd_ != -1) {
-        close(js_fd_);
-    }
+    if (controller_) SDL_GameControllerClose(controller_);
 }
 
-bool GamepadHandler::initialize(const std::string& device) {
-    device_path_ = device;
-    js_fd_ = open(device_path_.c_str(), O_RDONLY | O_NONBLOCK);
-    if (js_fd_ == -1) {
-        std::cerr << "Failed to open gamepad device: " << device_path_ << std::endl;
+bool GamepadHandler::init() {
+    if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0) {
+        std::cerr << "SDL GameController init failed: " << SDL_GetError() << std::endl;
         return false;
     }
-    
-    int num_axes = 0, num_buttons = 0;
-    ioctl(js_fd_, JSIOCGAXES, &num_axes);
-    ioctl(js_fd_, JSIOCGBUTTONS, &num_buttons);
-    
-    std::cout << "Gamepad initialized: " << num_axes << " axes, " 
-              << num_buttons << " buttons" << std::endl;
-    return true;
-}
-
-void GamepadHandler::start() {
-    if (running_) return;
-    running_ = true;
-    gamepad_thread_ = std::thread(&GamepadHandler::gamepad_loop, this);
-}
-
-void GamepadHandler::stop() {
-    running_ = false;
-    if (gamepad_thread_.joinable()) {
-        gamepad_thread_.join();
-    }
-}
-
-GamepadState GamepadHandler::get_state() {
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    return current_state_;
-}
-
-void GamepadHandler::gamepad_loop() {
-    js_event event;
-    
-    while (running_) {
-        while (read(js_fd_, &event, sizeof(event)) > 0) {
-            process_event(event);
-        }
-        
-        if (errno != EAGAIN) {
-            break; // Real error occurred
-        }
-        
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-}
-
-void GamepadHandler::process_event(const js_event& event) {
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    
-    switch (event.type & ~JS_EVENT_INIT) {
-        case JS_EVENT_BUTTON:
-            if (event.number < 16) {
-                current_state_.buttons[event.number] = event.value;
+    for (int i = 0; i < SDL_NumJoysticks(); i++) {
+        if (SDL_IsGameController(i)) {
+            controller_ = SDL_GameControllerOpen(i);
+            if (controller_) {
+                std::cout << "Gamepad connected: " << SDL_GameControllerName(controller_) << std::endl;
+                return true;
             }
-            break;
-            
-        case JS_EVENT_AXIS:
-            float normalized = event.value / 32767.0f;
-            
-            switch (event.number) {
-                case 0: current_state_.left_x = normalized; break;
-                case 1: current_state_.left_y = normalized; break;
-                case 2: current_state_.right_x = normalized; break;
-                case 3: current_state_.right_y = normalized; break;
-                case 4: break; //left trigger
-                case 5: break; //right trigger
-                case 6: // D-pad left/right
-                    if (event.value < -8000) current_state_.dpad_left = true;
-                    else if (event.value > 8000) current_state_.dpad_right = true;
-                    else current_state_.dpad_left = current_state_.dpad_right = false;
-                    break;
-                case 7: // D-pad up/down
-                    if (event.value < -8000) current_state_.dpad_up = true;
-                    else if (event.value > 8000) current_state_.dpad_down = true;
-                    else current_state_.dpad_up = current_state_.dpad_down = false;
-                    break;
-            }
-            break;
-    }
-    
-    // Update controller packet
-    current_state_.buttons_bitmask = 0;
-    for (int i = 0; i < 16; i++) {
-        if (current_state_.buttons[i]) {
-            current_state_.buttons_bitmask |= (1 << i);
         }
     }
-    
-    current_state_.left_stick_x = static_cast<int16_t>(current_state_.left_x * 32767);
-    current_state_.left_stick_y = static_cast<int16_t>(current_state_.left_y * 32767);
-    current_state_.right_stick_x = static_cast<int16_t>(current_state_.right_x * 32767);
-    current_state_.right_stick_y = static_cast<int16_t>(current_state_.right_y * 32767);
+    std::cerr << "No gamepad found." << std::endl;
+    return false;
+}
+
+void GamepadHandler::update() {
+    SDL_GameControllerUpdate();
+}
+
+uint8_t GamepadHandler::get_state(uint8_t button) const {
+    //state_.left_x = SDL_GameControllerGetAxis(controller_, SDL_CONTROLLER_AXIS_LEFTX) / 32767.0f;
+    return SDL_GameControllerGetButton(controller_, SDL_GameControllerButton(button));
+}
+
+int GamepadHandler::get_axis(uint8_t axis) const {
+    return SDL_GameControllerGetAxis(controller_, SDL_GameControllerAxis(axis));
 }
 
 // OSDMenu implementation
@@ -151,6 +78,7 @@ void OSDMenu::navigate_left() {
     auto& item = menu_items_[selected_item_];
     if (item.editable && item.selected > 0) {
         item.selected--;
+        if (item.is_toggle) handle_toggle(item);
     }
 }
 
@@ -159,13 +87,13 @@ void OSDMenu::navigate_right() {
     auto& item = menu_items_[selected_item_];
     if (item.editable && item.selected < item.options.size() - 1) {
         item.selected++;
+        if (item.is_toggle) handle_toggle(item);
     }
 }
 
 void OSDMenu::select_current() {
     std::lock_guard<std::mutex> lock(menu_mutex_);
-    if (selected_item_ == menu_items_.size() - 1) { // Start button
-        // Toggle start state
+    if (selected_item_ == 3) { // Start/Stop
         if (menu_items_[selected_item_].options[0] == "Start Capture") {
             menu_items_[selected_item_].options[0] = "Stop Capture";
         } else {
@@ -174,123 +102,176 @@ void OSDMenu::select_current() {
     }
 }
 
-void OSDMenu::display_menu(){
+void OSDMenu::toggle_menu() {
     std::lock_guard<std::mutex> lock(menu_mutex_);
-    display_menu_= !display_menu_;
+    menu_visible_ = !menu_visible_;
 }
 
-void OSDMenu::draw(cv::Mat& frame, int width, int height) {
+#include <SDL2_gfxPrimitives.h>
+void OSDMenu::draw(SDL_Renderer* renderer, int width, int height, TTF_Font* font) {
     std::lock_guard<std::mutex> lock(menu_mutex_);
-    
-    if(!display_menu_) return;
+    if (!menu_visible_) return;
 
-    int menu_width = 400;
-    int menu_height = 300;
-    int start_x = (width - menu_width) / 2;
-    int start_y = (height - menu_height) / 2;
-    
-    // Draw semi-transparent background
-    cv::rectangle(frame, 
-                  cv::Rect(start_x, start_y, menu_width, menu_height),
-                  cv::Scalar(0, 0, 0, 200), -1);
-    
-    // Draw border
-    cv::rectangle(frame,
-                  cv::Rect(start_x, start_y, menu_width, menu_height),
-                  cv::Scalar(255, 255, 255), 2);
-    
-    // Draw title
-    cv::putText(frame, "WiFi Video Receiver",
-                cv::Point(start_x + 20, start_y + 40),
-                cv::FONT_HERSHEY_SIMPLEX, 1.0,
-                cv::Scalar(0, 255, 255), 2);
-    
-    // Draw menu items
-    int y_offset = start_y + 80;
+    int menu_w = 400, menu_h = 300;
+    int start_x = (width - menu_w) / 2;
+    int start_y = (height - menu_h) / 2;
+
+    // Background
+    boxRGBA(renderer, start_x, start_y, start_x+menu_w, start_y+menu_h, 0,0,0,200);
+    rectangleRGBA(renderer, start_x, start_y, start_x+menu_w, start_y+menu_h, 255,255,255,255);
+
+    // Title
+    SDL_Color white = {255,255,255,255};
+    SDL_Surface* surf = TTF_RenderText_Solid(font, "WiFi Video Receiver", white);
+    if (surf) {
+        SDL_Texture* tex = SDL_CreateTextureFromSurface(renderer, surf);
+        SDL_Rect dst = {start_x + 20, start_y + 20, surf->w, surf->h};
+        SDL_RenderCopy(renderer, tex, NULL, &dst);
+        SDL_DestroyTexture(tex);
+        SDL_FreeSurface(surf);
+    }
+
+    // Menu items
+    int y = start_y + 70;
     for (size_t i = 0; i < menu_items_.size(); i++) {
         const auto& item = menu_items_[i];
         std::string text = item.name + ": " + item.options[item.selected];
-        
-        cv::Scalar color = (i == selected_item_) ? 
-                          cv::Scalar(0, 255, 0) : // Selected - green
-                          cv::Scalar(255, 255, 255); // Normal - white
-        
-        // Draw selection arrow
-        if (i == selected_item_) {
-            cv::putText(frame, ">",
-                        cv::Point(start_x + 10, y_offset),
-                        cv::FONT_HERSHEY_SIMPLEX, 0.8,
-                        cv::Scalar(0, 255, 0), 2);
+        if (i == selected_item_) text = "> " + text;
+        SDL_Color col = (i == selected_item_) ? (SDL_Color{0,255,0,255}) : white;
+        surf = TTF_RenderText_Solid(font, text.c_str(), col);
+        if (surf) {
+            SDL_Texture* tex = SDL_CreateTextureFromSurface(renderer, surf);
+            SDL_Rect dst = {start_x + 20, y, surf->w, surf->h};
+            SDL_RenderCopy(renderer, tex, NULL, &dst);
+            SDL_DestroyTexture(tex);
+            SDL_FreeSurface(surf);
         }
-        
-        cv::putText(frame, text,
-                    cv::Point(start_x + 40, y_offset),
-                    cv::FONT_HERSHEY_SIMPLEX, 0.7,
-                    color, 2);
-        
-        y_offset += 40;
+        y += 35;
     }
-    
-    // Draw instructions
-    cv::putText(frame, "Controls: D-Pad to navigate, A to select",
-                cv::Point(start_x + 20, start_y + menu_height - 20),
-                cv::FONT_HERSHEY_SIMPLEX, 0.6,
-                cv::Scalar(200, 200, 200), 1);
+
+    // Instructions
+    surf = TTF_RenderText_Solid(font, "D-Pad: navigate, A: select, B: toggle menu", white);
+    if (surf) {
+        SDL_Texture* tex = SDL_CreateTextureFromSurface(renderer, surf);
+        SDL_Rect dst = {start_x + 20, start_y + menu_h - 30, surf->w, surf->h};
+        SDL_RenderCopy(renderer, tex, NULL, &dst);
+        SDL_DestroyTexture(tex);
+        SDL_FreeSurface(surf);
+    }
 }
 
 std::string OSDMenu::get_selected_interface() const {
-    //std::unique_lock<std::mutex> lock(menu_mutex_);
-    if (menu_items_.size() > 1 && menu_items_[1].options.size() > menu_items_[1].selected) {
+    std::lock_guard<std::mutex> lock(menu_mutex_);
+    if (menu_items_.size() > 1 && menu_items_[1].options.size() > menu_items_[1].selected)
         return menu_items_[1].options[menu_items_[1].selected];
-    }
     return "wlan0mon";
 }
 
 std::string OSDMenu::get_selected_mac() const {
-    //std::lock_guard<std::mutex> lock(menu_mutex_);
+    std::lock_guard<std::mutex> lock(menu_mutex_);
     if (menu_items_.size() > 2 && menu_items_[2].options.size() > menu_items_[2].selected) {
-        if (menu_items_[2].selected == 0) return ""; // "All" option
+        if (menu_items_[2].selected == 0) return "";
         return menu_items_[2].options[menu_items_[2].selected];
     }
     return "";
 }
 
 bool OSDMenu::should_start_capture() const {
-    //std::lock_guard<std::mutex> lock(menu_mutex_);
+    std::lock_guard<std::mutex> lock(menu_mutex_);
     if (menu_items_.size() > 3) {
         return menu_items_[3].options[0] == "Stop Capture";
     }
     return false;
 }
 
+HUDConfig OSDMenu::getHUDConfig() const {
+    std::lock_guard<std::mutex> lock(menu_mutex_);
+    return hud_config_;
+}
+
+void OSDMenu::setHUDConfig(const HUDConfig& cfg) {
+    std::lock_guard<std::mutex> lock(menu_mutex_);
+    hud_config_ = cfg;
+}
+
 void OSDMenu::populate_menu() {
     menu_items_.clear();
-    
-    MenuItem mode_item;
-    mode_item.name = "Mode";
-    mode_item.options = {"Receive", "Inject"};
-    mode_item.selected = 0;
-    mode_item.editable = true;
-    menu_items_.push_back(mode_item);
-    
-    MenuItem interface_item;
-    interface_item.name = "Interface";
-    interface_item.options = {"wlan0mon"};
-    interface_item.selected = 0;
-    interface_item.editable = true;
-    menu_items_.push_back(interface_item);
-    
-    MenuItem mac_item;
-    mac_item.name = "MAC Filter";
-    mac_item.options = {"All"};
-    mac_item.selected = 0;
-    mac_item.editable = true;
-    menu_items_.push_back(mac_item);
-    
-    MenuItem start_item;
-    start_item.name = "Control";
-    start_item.options = {"Start Capture"};
-    start_item.selected = 0;
-    start_item.editable = false;
-    menu_items_.push_back(start_item);
+
+    MenuItem mode;
+    mode.name = "Mode";
+    mode.options = {"Receive", "Inject"};
+    mode.selected = 0;
+    mode.editable = true;
+    menu_items_.push_back(mode);
+
+    MenuItem interface;
+    interface.name = "Interface";
+    interface.options = {"wlan0mon"};
+    interface.selected = 0;
+    interface.editable = true;
+    menu_items_.push_back(interface);
+
+    MenuItem mac;
+    mac.name = "MAC Filter";
+    mac.options = {"All"};
+    mac.selected = 0;
+    mac.editable = true;
+    menu_items_.push_back(mac);
+
+    MenuItem start;
+    start.name = "Control";
+    start.options = {"Start Capture"};
+    start.selected = 0;
+    start.editable = false;
+    menu_items_.push_back(start);
+
+    // Add HUD toggle items
+    MenuItem speed;
+    speed.name = "Show Speed";
+    speed.options = {"On","Off"};
+    speed.selected = hud_config_.show_speed ? 0 : 1;
+    speed.editable = true;
+    speed.is_toggle = true;
+    menu_items_.push_back(speed);
+
+    MenuItem alt;
+    alt.name = "Show Altitude";
+    alt.options = {"On","Off"};
+    alt.selected = hud_config_.show_altitude ? 0 : 1;
+    alt.editable = true;
+    alt.is_toggle = true;
+    menu_items_.push_back(alt);
+
+    MenuItem heading;
+    heading.name = "Show Heading";
+    heading.options = {"On","Off"};
+    heading.selected = hud_config_.show_heading ? 0 : 1;
+    heading.editable = true;
+    heading.is_toggle = true;
+    menu_items_.push_back(heading);
+
+    MenuItem attitude;
+    attitude.name = "Show Attitude";
+    attitude.options = {"On","Off"};
+    attitude.selected = hud_config_.show_attitude ? 0 : 1;
+    attitude.editable = true;
+    attitude.is_toggle = true;
+    menu_items_.push_back(attitude);
+
+    MenuItem predicted;
+    predicted.name = "Show Predicted";
+    predicted.options = {"On","Off"};
+    predicted.selected = hud_config_.show_predicted ? 0 : 1;
+    predicted.editable = true;
+    predicted.is_toggle = true;
+    menu_items_.push_back(predicted);
+}
+
+void OSDMenu::handle_toggle(MenuItem& item) {
+    bool on = (item.selected == 0);
+    if (item.name == "Show Speed") hud_config_.show_speed = on;
+    else if (item.name == "Show Altitude") hud_config_.show_altitude = on;
+    else if (item.name == "Show Heading") hud_config_.show_heading = on;
+    else if (item.name == "Show Attitude") hud_config_.show_attitude = on;
+    else if (item.name == "Show Predicted") hud_config_.show_predicted = on;
 }
