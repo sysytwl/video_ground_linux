@@ -11,8 +11,8 @@ void msp_parser_init(msp_parser_t *parser) {
 }
 
 // 处理V1包校验和并解析数据
-static void handle_v1_packet(msp_parser_t *parser, uint8_t checksum,
-                             msp_osd_callback_t cb, void *user) {
+std::mutex g_osd_mutex;
+static void handle_v1_packet(msp_parser_t *parser, uint8_t checksum, msp_osd_callback_t cb, void *user) {
     // 计算校验和：从指令开始到数据结束的XOR
     uint8_t calc = parser->cmd;
     calc ^= parser->expected_len;
@@ -28,10 +28,10 @@ static void handle_v1_packet(msp_parser_t *parser, uint8_t checksum,
         cb(parser->cmd, parser->in_buf, parser->expected_len, user);
     }
 
-    // 可选：将解析出的数据存入g_osd
     switch (parser->cmd) {
     case MSP_ATTITUDE:
         if (parser->expected_len >= 6) {
+            std::lock_guard<std::mutex> lock(g_osd_mutex);
             g_osd.roll = (int16_t)(parser->in_buf[0] | (parser->in_buf[1] << 8));
             g_osd.pitch = (int16_t)(parser->in_buf[2] | (parser->in_buf[3] << 8));
             g_osd.yaw = (int16_t)(parser->in_buf[4] | (parser->in_buf[5] << 8));
@@ -39,6 +39,7 @@ static void handle_v1_packet(msp_parser_t *parser, uint8_t checksum,
         break;
     case MSP_ALTITUDE:
         if (parser->expected_len >= 6) {
+            std::lock_guard<std::mutex> lock(g_osd_mutex);
             g_osd.altitude = (int32_t)(parser->in_buf[0] | (parser->in_buf[1] << 8) |
                                         (parser->in_buf[2] << 16) | (parser->in_buf[3] << 24));
             g_osd.vario = (int16_t)(parser->in_buf[4] | (parser->in_buf[5] << 8));
@@ -46,6 +47,7 @@ static void handle_v1_packet(msp_parser_t *parser, uint8_t checksum,
         break;
     case MSP_ANALOG:
         if (parser->expected_len >= 7) {
+            std::lock_guard<std::mutex> lock(g_osd_mutex);
             g_osd.voltage = parser->in_buf[0];
             g_osd.amperage = (uint16_t)(parser->in_buf[1] | (parser->in_buf[2] << 8));
             g_osd.mAh_drawn = (uint16_t)(parser->in_buf[3] | (parser->in_buf[4] << 8));
@@ -54,6 +56,7 @@ static void handle_v1_packet(msp_parser_t *parser, uint8_t checksum,
         break;
     case MSP_GPS:
         if (parser->expected_len >= 16) {
+            std::lock_guard<std::mutex> lock(g_osd_mutex);
             g_osd.gps_fix = parser->in_buf[0];
             g_osd.gps_num_sat = parser->in_buf[1];
             g_osd.gps_lat = (int32_t)(parser->in_buf[2] | (parser->in_buf[3] << 8) |
@@ -65,7 +68,43 @@ static void handle_v1_packet(msp_parser_t *parser, uint8_t checksum,
             g_osd.gps_ground_course = (uint16_t)(parser->in_buf[14] | (parser->in_buf[15] << 8));
         }
         break;
-    // 其他指令可根据需要添加
+    case MSP_SET_OSD_CANVAS:
+        // 格式：[rows] [cols]
+        if (parser->expected_len >= 2) {
+            g_osd_screen.setSize(parser->in_buf[0], parser->in_buf[1]);
+        }
+        break;
+
+    case MSP_DISPLAYPORT:{
+        // 数据格式：[子命令][数据...]
+        if (parser->expected_len < 1) return;
+        uint8_t subcmd = parser->in_buf[0];
+        switch (subcmd) {
+        case MSP_DP_WRITE_STRING: {
+            // 格式：[row] [col] [attr] [string...] （无长度，string 后无 NULL，但包长度确定）
+            if (parser->expected_len < 4) break;
+            uint8_t row = parser->in_buf[1];
+            uint8_t col = parser->in_buf[2];
+            uint8_t attr = parser->in_buf[3];
+            size_t str_len = parser->expected_len - 4;
+            if (str_len > 0) {
+                g_osd_screen.writeString(row, col, attr, &parser->in_buf[4], str_len);
+            }
+            break;
+        }
+        case MSP_DP_CLEAR_SCREEN:
+            g_osd_screen.clear();
+            break;
+        case MSP_DP_HEARTBEAT:
+            // 心跳，可忽略或用于重置超时
+            break;
+        // 可扩展其他子命令...
+        default:
+            break;
+        }
+
+        break;
+    }
     default:
         break;
     }
@@ -132,3 +171,7 @@ void msp_parse_bytes(msp_parser_t *parser, const uint8_t *data, size_t len,
         }
     }
 }
+
+// msp.cpp 末尾追加
+
+OSDScreen g_osd_screen;   // 定义全局屏幕

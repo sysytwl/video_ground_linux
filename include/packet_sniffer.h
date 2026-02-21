@@ -8,7 +8,6 @@
 
 #include "wifi_packet.h"
 #include "packet_pool.h"
-#include "gamepad_osd.h"
 
 class PacketSniffer {
 private:
@@ -27,11 +26,6 @@ private:
     std::vector<pcap_t*> multi_handles_;
     std::vector<std::thread> capture_threads_;
     std::vector<std::string> interfaces_;
-
-    //injection
-    void prepare_radiotap_header();
-    std::vector<uint8_t> RADIOTAP_HEADER;
-    uint8_t _injection_rate = 1; //mbps
 
     void single_capture_thread(pcap_t* handle, int packet_count);
     bool initialize_pcap(std::string interface);
@@ -58,5 +52,8 @@ public:
     void start_multi_capture(int packet_count = 0);
     void stop_multi_capture();
 };
+
+// Function to discover interfaces
+std::vector<std::string> discover_interfaces();
 
 #endif // PACKET_SNIFFER_H

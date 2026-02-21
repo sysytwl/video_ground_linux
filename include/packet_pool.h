@@ -15,7 +15,6 @@
 #define FEC_K 4
 #define FEC_N 7
 
-// C-style callback for decoded data
 typedef void (*PacketCallback)(const uint8_t* data, size_t size, bool vsync, uint8_t count);
 
 class PacketPool {

@@ -13,44 +13,6 @@ enum RenderMode {
     RENDER_GRAPHIC = 0,
     RENDER_TEXT = 1
 };
-RenderMode getRenderMode() const;
-
-struct GamepadState {
-    float left_x = 0.0f;
-    float left_y = 0.0f;
-    float right_x = 0.0f;
-    float right_y = 0.0f;
-    bool buttons[16] = {false};
-    bool dpad_up = false;
-    bool dpad_down = false;
-    bool dpad_left = false;
-    bool dpad_right = false;
-    
-    // Controller packet structure
-    uint8_t packet_version = 0x01;
-    uint8_t type = 0x02;
-    uint32_t buttons_bitmask = 0;
-    int16_t left_stick_x = 0;
-    int16_t left_stick_y = 0;
-    int16_t right_stick_x = 0;
-    int16_t right_stick_y = 0;
-};
-
-class GamepadHandler {
-public:
-    GamepadHandler();
-    ~GamepadHandler();
-
-    bool init();
-    void update();  // call this in main loop
-    uint8_t get_state(uint8_t button) const;
-    int get_axis(uint8_t axis) const;
-
-private:
-    SDL_GameController* controller_ = nullptr;
-    GamepadState state_;
-    Uint8 button_previous_[16] = {0};
-};
 
 class OSDMenu {
 public:
@@ -65,7 +27,7 @@ public:
     void navigate_right();
     void select_current();
     void toggle_menu();
-
+    RenderMode getRenderMode() const;
     void draw(SDL_Renderer* renderer, int width, int height, TTF_Font* font);
 
     std::string get_selected_interface() const;

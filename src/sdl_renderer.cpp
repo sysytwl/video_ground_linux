@@ -27,7 +27,7 @@ void SDLRenderer::render_frame(const std::vector<uint8_t>& frame_rgb, int width,
     void* pixels;
     int pitch;
     SDL_LockTexture(frame_texture_, nullptr, &pixels, &pitch);
-    memcpy(pixels, frame_rgb.data(), frame_rgb.size());
+    memcpy(pixels, frame_rgb.data(), frame_rgb.size());                                                                                                                                                                                                                        
     SDL_UnlockTexture(frame_texture_);
 
     // Clear screen
@@ -57,7 +57,7 @@ void SDLRenderer::render_frame(const std::vector<uint8_t>& frame_rgb, int width,
         if (span.count() > 0) fps = (frame_timestamps_.size() - 1) * 1000.0f / span.count();
     }
     render_fps(fps);
-    render_center_cross();
+    //render_center_cross();
 }
 
 #include <string>

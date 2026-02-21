@@ -14,7 +14,25 @@ include_directories(${OpenCV_INCLUDE_DIRS})
 
 # SDL2 and its extensions
 find_package(SDL2 REQUIRED)
+
 find_package(SDL2_image REQUIRED)
+
+find_path(SDL2_IMAGE_INCLUDE_DIR 
+    NAMES SDL_image.h
+    PATH_SUFFIXES SDL2
+    PATHS /usr/include /usr/local/include $ENV{SDL2DIR}/include
+)
+find_library(SDL2_IMAGE_LIBRARIE
+    NAMES SDL2_image
+    PATHS /usr/lib /usr/local/lib $ENV{SDL2DIR}/lib
+)
+if(NOT SDL2_IMAGE_LIBRARIE OR NOT SDL2_IMAGE_INCLUDE_DIR)
+    message(FATAL_ERROR "Could not find SDL2_image library and/or headers. Please install the development package.")
+endif()
+set(SDL2_IMAGE_LIBRARIES ${SDL2_IMAGE_LIBRARIE})
+set(SDL2_IMAGE_INCLUDE_DIRS ${SDL2_IMAGE_INCLUDE_DIR})
+message(STATUS "Found SDL2_image: ${SDL2_IMAGE_LIBRARIE}")
+
 # --- 手动查找 SDL2_ttf 库 ---
 find_path(SDL2_TTF_INCLUDE_DIR
     NAMES SDL_ttf.h
@@ -31,6 +49,7 @@ endif()
 set(SDL2_TTF_LIBRARIES ${SDL2_TTF_LIBRARY})
 set(SDL2_TTF_INCLUDE_DIRS ${SDL2_TTF_INCLUDE_DIR})
 message(STATUS "Found SDL2_ttf: ${SDL2_TTF_LIBRARY}")
+
 # --- 手动查找 SDL2_gfx 库 ---
 find_path(SDL2_GFX_INCLUDE_DIR
     NAMES SDL2_framerate.h SDL2_gfxPrimitives.h SDL2_imageFilter.h SDL2_rotozoom.h # SDL2_gfx 库的主要头文件

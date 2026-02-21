@@ -2,7 +2,6 @@
 #include "wifi_inj_sin.h"
 #include "radiotap.h"
 #include "fec.h"
-#include "global_v.h"
 
 #include <iostream>
 #include <cstring>
@@ -10,6 +9,9 @@
 #include <algorithm>
 #include <time.h>
 #include <stdarg.h>
+
+uint8_t data_rate;
+int8_t dbm_antsignal;
 
 // Global or static variable
 static FILE *log_file = NULL;

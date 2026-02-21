@@ -13,27 +13,12 @@
 PacketSniffer sniffer;
 GamepadHandler gamepad;
 OSDMenu g_osd_menu;
-VideoDecoder video_decoder;
 
 std::atomic<bool> g_running(true);
 
 void signal_handler(int sig) {
     g_running = false;
     sniffer.stop_capture();
-}
-
-// Function to discover interfaces (unchanged)
-std::vector<std::string> discover_interfaces() {
-    std::vector<std::string> interfaces;
-    char errbuf[PCAP_ERRBUF_SIZE];
-    pcap_if_t *alldevs;
-    if (pcap_findalldevs(&alldevs, errbuf) == 0) {
-        for (pcap_if_t *d = alldevs; d; d = d->next) {
-            interfaces.push_back(d->name);
-        }
-        pcap_freealldevs(alldevs);
-    }
-    return interfaces;
 }
 
 // Function to handle OSD updates based on gamepad input
@@ -83,7 +68,6 @@ int main(int argc, char* argv[]) {
     // Signal handling
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
-
   
     // Initialize components
     if (!gamepad.init()) {
@@ -96,12 +80,12 @@ int main(int argc, char* argv[]) {
     std::vector<std::string> macs = {"94:b5:55:26:e2:ff", "58:bf:25:1b:07:cb"};
     g_osd_menu.set_discovered_macs(macs);
 
-    // Main loop
-    bool capture_started = false;
     //Uint32 last_gamepad_update = SDL_GetTicks();
 
     // Start OSD control thread
     std::thread osd_control_thread(handle_osd_controls);
+
+    std::thread img_decode_thread(decoder_thread);
 
     while (g_running) {
         SDL_Event e;
@@ -112,28 +96,24 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // Update gamepad at ~60 Hz
-        //Uint32 now = SDL_GetTicks();
-        //gamepad.update();
-
         // Check if we should start capture
-        if (!capture_started && g_osd_menu.should_start_capture()) {
+        if (g_osd_menu.should_start_capture()) {
             std::string iface = g_osd_menu.get_selected_interface();
             std::string mac_filter = g_osd_menu.get_selected_mac();
             uint8_t filter_case = mac_filter.empty() ? 2 : 1;
             if (sniffer.initialize(iface, filter_case, mac_filter)) {
                 sniffer.start_capture(0);
-                capture_started = true;
             }
         }
+
+        if (!g_running) break;
     }
 
     // Cleanup
     sniffer.stop_capture();
     video_stop();
-    if (osd_control_thread.joinable()) {
-        osd_control_thread.join();
-    }
+    if (img_decode_thread.joinable()) img_decode_thread.join();
+    if (osd_control_thread.joinable()) osd_control_thread.join();
 
     return 0;
 }

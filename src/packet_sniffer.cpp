@@ -336,110 +336,120 @@ void PacketSniffer::pcap_callback(u_char* user_data, const struct pcap_pkthdr* p
     sniffer->packet_handler(pkthdr, packet);
 }
 
-#include "ieee80211_radiotap.h"
-
-static void radiotap_add_u8(uint8_t*& dst, size_t& idx, uint8_t data){
-    *dst++ = data;
-    idx++;
-}
-
-static void radiotap_add_u16(uint8_t*& dst, size_t& idx, uint16_t data){
-    if ((idx & 1) == 1) //not aligned, pad first
-    {
-        radiotap_add_u8(dst, idx, 0);
-    }
-    *reinterpret_cast<uint16_t*>(dst) = data;
-    dst += 2;
-    idx += 2;
-}
-
-void PacketSniffer::prepare_radiotap_header(){
-    RADIOTAP_HEADER.clear();
-    RADIOTAP_HEADER.resize(1024);
-    ieee80211_radiotap_header& hdr = reinterpret_cast<ieee80211_radiotap_header& >(*RADIOTAP_HEADER.data());
-    hdr.it_version = 0;
-    hdr.it_present = 0;
-
-    auto* dst = RADIOTAP_HEADER.data() + sizeof(ieee80211_radiotap_header);
-    size_t idx = dst - RADIOTAP_HEADER.data();
-
-    //| (1 << IEEE80211_RADIOTAP_RATE)
-    //radiotap_add_u8(dst, idx, _injection_rate*2);//500kpbs
-    hdr.it_present |= (1 << IEEE80211_RADIOTAP_TX_FLAGS);
-    radiotap_add_u16(dst, idx, IEEE80211_RADIOTAP_F_TX_NOACK); //used to be 0x18
-    //| (1 << IEEE80211_RADIOTAP_RTS_RETRIES)
-    //radiotap_add_u8(dst, idx, 0x0);
-    hdr.it_present |= (1 << IEEE80211_RADIOTAP_DATA_RETRIES);
-    radiotap_add_u8(dst, idx, 0x0);
-    //| (1 << IEEE80211_RADIOTAP_CHANNEL)
-    // radiotap_add_u16(dst, idx, CH13_FREQ);
-    // radiotap_add_u16(dst, idx, 0);
-    hdr.it_present |= (1 << IEEE80211_RADIOTAP_MCS);
-    radiotap_add_u8(dst, idx, IEEE80211_RADIOTAP_MCS_HAVE_MCS | IEEE80211_RADIOTAP_MCS_HAVE_BW | IEEE80211_RADIOTAP_MCS_HAVE_GI ); // short gI
-    radiotap_add_u8(dst, idx, IEEE80211_RADIOTAP_MCS_BW_20 );  //HT20
-    radiotap_add_u8(dst, idx, 0);  //MCS Index 1 13M
-
-    //finish it
-    hdr.it_len = static_cast<__le16>(idx);
-    RADIOTAP_HEADER.resize(idx);
-}
-
-#include "wifi_inj_sin.h"
-
-uint32_t calculate_fcs(const uint8_t *data, size_t len) {
-    uint32_t crc = 0xFFFFFFFF;
-
-    for (size_t i = 0; i < len; i++) {
-        crc ^= data[i];
-        for (int j = 0; j < 8; j++) {
-            if (crc & 1) {
-                crc = (crc >> 1) ^ 0xEDB88320;
-            } else {
-                crc >>= 1;
-            }
+// Function to discover interfaces
+std::vector<std::string> discover_interfaces() {
+    std::vector<std::string> interfaces;
+    char errbuf[PCAP_ERRBUF_SIZE];
+    pcap_if_t *alldevs;
+    if (pcap_findalldevs(&alldevs, errbuf) == 0) {
+        for (pcap_if_t *d = alldevs; d; d = d->next) {
+            interfaces.push_back(d->name);
         }
+        pcap_freealldevs(alldevs);
     }
-
-    return ~crc;
+    return interfaces;
 }
 
-#include "gamepad_osd.h"
-extern GamepadHandler gamepad;
+// #include "ieee80211_radiotap.h"
 
-void PacketSniffer::injection_loop() {
-    const int injection_rate_hz = 60;
-    const auto injection_interval = std::chrono::milliseconds(1000 / injection_rate_hz);
+// static void radiotap_add_u8(uint8_t*& dst, size_t& idx, uint8_t data){
+//     *dst++ = data;
+//     idx++;
+// }
+
+// static void radiotap_add_u16(uint8_t*& dst, size_t& idx, uint16_t data){
+//     if ((idx & 1) == 1) //not aligned, pad first
+//     {
+//         radiotap_add_u8(dst, idx, 0);
+//     }
+//     *reinterpret_cast<uint16_t*>(dst) = data;
+//     dst += 2;
+//     idx += 2;
+// }
+
+// void prepare_radiotap_header(std::vector<uint8_t> RADIOTAP_HEADER){
+//     RADIOTAP_HEADER.clear();
+//     RADIOTAP_HEADER.resize(1024);
+//     ieee80211_radiotap_header& hdr = reinterpret_cast<ieee80211_radiotap_header& >(*RADIOTAP_HEADER.data());
+//     hdr.it_version = 0;
+//     hdr.it_present = 0;
+
+//     auto* dst = RADIOTAP_HEADER.data() + sizeof(ieee80211_radiotap_header);
+//     size_t idx = dst - RADIOTAP_HEADER.data();
+
+//     //| (1 << IEEE80211_RADIOTAP_RATE)
+//     //radiotap_add_u8(dst, idx, _injection_rate*2);//500kpbs
+//     hdr.it_present |= (1 << IEEE80211_RADIOTAP_TX_FLAGS);
+//     radiotap_add_u16(dst, idx, IEEE80211_RADIOTAP_F_TX_NOACK); //used to be 0x18
+//     //| (1 << IEEE80211_RADIOTAP_RTS_RETRIES)
+//     //radiotap_add_u8(dst, idx, 0x0);
+//     hdr.it_present |= (1 << IEEE80211_RADIOTAP_DATA_RETRIES);
+//     radiotap_add_u8(dst, idx, 0x0);
+//     //| (1 << IEEE80211_RADIOTAP_CHANNEL)
+//     // radiotap_add_u16(dst, idx, CH13_FREQ);
+//     // radiotap_add_u16(dst, idx, 0);
+//     hdr.it_present |= (1 << IEEE80211_RADIOTAP_MCS);
+//     radiotap_add_u8(dst, idx, IEEE80211_RADIOTAP_MCS_HAVE_MCS | IEEE80211_RADIOTAP_MCS_HAVE_BW | IEEE80211_RADIOTAP_MCS_HAVE_GI ); // short gI
+//     radiotap_add_u8(dst, idx, IEEE80211_RADIOTAP_MCS_BW_20 );  //HT20
+//     radiotap_add_u8(dst, idx, 0);  //MCS Index 1 13M
+
+//     //finish it
+//     hdr.it_len = static_cast<__le16>(idx);
+//     RADIOTAP_HEADER.resize(idx);
+// }
+
+// #include "wifi_inj_sin.h"
+
+// uint32_t calculate_fcs(const uint8_t *data, size_t len) {
+//     uint32_t crc = 0xFFFFFFFF;
+
+//     for (size_t i = 0; i < len; i++) {
+//         crc ^= data[i];
+//         for (int j = 0; j < 8; j++) {
+//             if (crc & 1) {
+//                 crc = (crc >> 1) ^ 0xEDB88320;
+//             } else {
+//                 crc >>= 1;
+//             }
+//         }
+//     }
+
+//     return ~crc;
+// }
+// void injection_loop() {
+//     const int injection_rate_hz = 60;
+//     const auto injection_interval = std::chrono::milliseconds(1000 / injection_rate_hz);
 
 
-    uint8_t* injection_packet;
-    injection_packet = (uint8_t*)malloc(1600);
-    Ground2Air_Data_Packet payload;
-    payload.packet_version = PACKET_VERSION;
-    while (running_) {
-        size_t packet_size = 0;
+//     uint8_t* injection_packet;
+//     injection_packet = (uint8_t*)malloc(1600);
+//     Ground2Air_Data_Packet payload;
+//     payload.packet_version = PACKET_VERSION;
+//     while (running_) {
+//         size_t packet_size = 0;
 
-        // Add Radiotap header
-        prepare_radiotap_header();
-        memcpy(injection_packet,RADIOTAP_HEADER.data(),RADIOTAP_HEADER.size());
-        packet_size += RADIOTAP_HEADER.size();
+//         // Add Radiotap header
+//         prepare_radiotap_header();
+//         memcpy(injection_packet,RADIOTAP_HEADER.data(),RADIOTAP_HEADER.size());
+//         packet_size += RADIOTAP_HEADER.size();
 
-        // IEEE header
-        memcpy(injection_packet+packet_size,&WLAN_IEEE_HEADER_GROUND2AIR[0], WLAN_IEEE_HEADER_SIZE);
-        packet_size += WLAN_IEEE_HEADER_SIZE;
+//         // IEEE header
+//         memcpy(injection_packet+packet_size,&WLAN_IEEE_HEADER_GROUND2AIR[0], WLAN_IEEE_HEADER_SIZE);
+//         packet_size += WLAN_IEEE_HEADER_SIZE;
 
-        //DATA test payload
-        payload.type = Ground2Air_Data_Packet::Type::Telemetry;
-        gamepad.update();
-        payload.channel_data[0] = 1000+66*(gamepad.get_axis(2) + 32767);
-        payload.channel_data[1] =  1000+66*(gamepad.get_axis(3) + 32767);
-        payload.channel_data[2] =  1000+66*(gamepad.get_axis(0) + 32767);
-        payload.channel_data[3] =  1000+66*(gamepad.get_axis(1) + 32767);
-        payload.channel_data_1[0] = 0;
-        memcpy(injection_packet+packet_size, &payload, sizeof(Ground2Air_Data_Packet));
-        packet_size += sizeof(Ground2Air_Data_Packet);
+//         //DATA test payload
+//         payload.type = Ground2Air_Data_Packet::Type::Telemetry;
+//         gamepad.update();
+//         payload.channel_data[0] = 1000+66*(gamepad.get_axis(2) + 32767);
+//         payload.channel_data[1] =  1000+66*(gamepad.get_axis(3) + 32767);
+//         payload.channel_data[2] =  1000+66*(gamepad.get_axis(0) + 32767);
+//         payload.channel_data[3] =  1000+66*(gamepad.get_axis(1) + 32767);
+//         payload.channel_data_1[0] = 0;
+//         memcpy(injection_packet+packet_size, &payload, sizeof(Ground2Air_Data_Packet));
+//         packet_size += sizeof(Ground2Air_Data_Packet);
 
-        //pcap_inject(handle_, injection_packet, packet_size);
+//         //pcap_inject(handle_, injection_packet, packet_size);
 
-        std::this_thread::sleep_for(injection_interval);
-    }
-}
+//         std::this_thread::sleep_for(injection_interval);
+//     }
+// }

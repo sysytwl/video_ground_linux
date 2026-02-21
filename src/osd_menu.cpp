@@ -1,42 +1,6 @@
-#include "gamepad_osd.h"
+#include "osd_menu.h"
 #include <iostream>
 
-GamepadHandler::GamepadHandler() {}
-
-GamepadHandler::~GamepadHandler() {
-    if (controller_) SDL_GameControllerClose(controller_);
-}
-
-bool GamepadHandler::init() {
-    if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0) {
-        std::cerr << "SDL GameController init failed: " << SDL_GetError() << std::endl;
-        return false;
-    }
-    for (int i = 0; i < SDL_NumJoysticks(); i++) {
-        if (SDL_IsGameController(i)) {
-            controller_ = SDL_GameControllerOpen(i);
-            if (controller_) {
-                std::cout << "Gamepad connected: " << SDL_GameControllerName(controller_) << std::endl;
-                return true;
-            }
-        }
-    }
-    std::cerr << "No gamepad found." << std::endl;
-    return false;
-}
-
-void GamepadHandler::update() {
-    SDL_GameControllerUpdate();
-}
-
-uint8_t GamepadHandler::get_state(uint8_t button) const {
-    //state_.left_x = SDL_GameControllerGetAxis(controller_, SDL_CONTROLLER_AXIS_LEFTX) / 32767.0f;
-    return SDL_GameControllerGetButton(controller_, SDL_GameControllerButton(button));
-}
-
-int GamepadHandler::get_axis(uint8_t axis) const {
-    return SDL_GameControllerGetAxis(controller_, SDL_GameControllerAxis(axis));
-}
 
 // OSDMenu implementation
 OSDMenu::OSDMenu() {
@@ -199,8 +163,8 @@ void OSDMenu::populate_menu() {
 
     MenuItem mode;
     mode.name = "Mode";
-    mode.options = {"Receive", "Inject"};
-    mode.selected = 0;
+    mode.options = {"Graphic HUD", "Text OSD"};
+    mode.selected = 1;
     mode.editable = true;
     menu_items_.push_back(mode);
 
@@ -265,6 +229,12 @@ void OSDMenu::populate_menu() {
     predicted.editable = true;
     predicted.is_toggle = true;
     menu_items_.push_back(predicted);
+}
+
+RenderMode OSDMenu::getRenderMode() const {
+    std::lock_guard<std::mutex> lock(menu_mutex_);
+    if (menu_items_.empty()) return RENDER_GRAPHIC;
+    return (RenderMode)menu_items_[0].selected;
 }
 
 void OSDMenu::handle_toggle(MenuItem& item) {
