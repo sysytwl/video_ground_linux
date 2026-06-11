@@ -6,6 +6,7 @@ GamepadHandler::~GamepadHandler() {
     if (controller_) SDL_GameControllerClose(controller_);
 }
 
+#include <iostream>
 bool GamepadHandler::init() {
     if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0) {
         std::cerr << "SDL GameController init failed: " << SDL_GetError() << std::endl;

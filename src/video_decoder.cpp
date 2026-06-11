@@ -1,17 +1,23 @@
-#include "video_decoder.h"
+#include <SDL.h>
+#include <SDL_ttf.h>
+#include <algorithm>
+#include <vector>
+#include <deque>
+#include <chrono>
 #include <turbojpeg.h>
 #include <iostream>
 #include <cstring>
 #include <queue>
 #include <condition_variable>
+#include <cmath>  // for M_PI
 #include "hud_overlay.h"
 #include "object_detector.h"
-#include "sdl_renderer.h"
 #include "msp.h"
-#include <cmath>  // for M_PI
 #include "turbojpeg.h"
-#include "gamepad_osd.h"
-extern OSDMenu g_osd_menu;
+#include "video_decoder.h"
+
+
+extern HUDOverlay hud;
 
 struct ImageBuffer {
     std::vector<uint8_t> buffer;
@@ -24,6 +30,88 @@ std::condition_variable pack_buffer_cv_;
 std::atomic<bool> running{true};
 tjhandle tj_instance_;
 ObjectDetector object_detector;
+
+SDL_Renderer* renderer_;
+TTF_Font* font_;
+SDL_Texture* frame_texture_ = nullptr;
+int last_width_ = 0, last_height_ = 0;
+int screen_width_, screen_height_;
+
+std::deque<std::chrono::steady_clock::time_point> frame_timestamps_;
+static constexpr int FPS_WINDOW = 30;
+
+//===================img resize=========================
+#include <string>
+void render_fps(float fps) {
+    if (!font_) return;
+    std::string text = "FPS: " + std::to_string((int)fps);
+    SDL_Color color = {0, 255, 0, 255};
+    SDL_Surface* surf = TTF_RenderText_Solid(font_, text.c_str(), color);
+    if (surf) {
+        SDL_Texture* tex = SDL_CreateTextureFromSurface(renderer_, surf);
+        SDL_Rect dst = {10, 10, surf->w, surf->h};
+        SDL_RenderCopy(renderer_, tex, nullptr, &dst);
+        SDL_DestroyTexture(tex);
+        SDL_FreeSurface(surf);
+    }
+}
+
+void render_center_cross() {
+    int cx = screen_width_ / 2;
+    int cy = screen_height_ / 2;
+    int len = 15;
+    SDL_SetRenderDrawColor(renderer_, 255, 0, 0, 255);
+    SDL_RenderDrawLine(renderer_, cx - len, cy, cx + len, cy);
+    SDL_RenderDrawLine(renderer_, cx, cy - len, cx, cy + len);
+}
+
+void render_frame(const std::vector<uint8_t>& frame_rgb, int width, int height) {
+    if (frame_rgb.empty()) return;
+
+    // Create or recreate texture if size changed
+    if (!frame_texture_ || width != last_width_ || height != last_height_) {
+        if (frame_texture_) SDL_DestroyTexture(frame_texture_);
+        frame_texture_ = SDL_CreateTexture(renderer_,SDL_PIXELFORMAT_RGB24,SDL_TEXTUREACCESS_STREAMING,width, height);
+        last_width_ = width;
+        last_height_ = height;
+    }
+
+    void* pixels;
+    int pitch;
+    SDL_LockTexture(frame_texture_, nullptr, &pixels, &pitch);
+    memcpy(pixels, frame_rgb.data(), frame_rgb.size());                                                                                                                                                                                                                        
+    SDL_UnlockTexture(frame_texture_);
+
+    // Clear screen
+    SDL_SetRenderDrawColor(renderer_, 0, 0, 0, 255);
+    SDL_RenderClear(renderer_);
+
+    // Calculate aspect-ratio preserving rectangle
+    float scale_x = (float)screen_width_ / width;
+    float scale_y = (float)screen_height_ / height;
+    float scale = std::min(scale_x, scale_y);
+    int disp_w = width * scale;
+    int disp_h = height * scale;
+    int disp_x = (screen_width_ - disp_w) / 2;
+    int disp_y = (screen_height_ - disp_h) / 2;
+    SDL_Rect dst = {disp_x, disp_y, disp_w, disp_h};
+    SDL_RenderCopy(renderer_, frame_texture_, nullptr, &dst);
+
+    // Update FPS counter
+    auto now = std::chrono::steady_clock::now();
+    frame_timestamps_.push_back(now);
+    if (frame_timestamps_.size() > FPS_WINDOW) frame_timestamps_.pop_front();
+
+    float fps = 0;
+    if (frame_timestamps_.size() >= 2) {
+        auto span = std::chrono::duration_cast<std::chrono::milliseconds>(
+            frame_timestamps_.back() - frame_timestamps_.front());
+        if (span.count() > 0) fps = (frame_timestamps_.size() - 1) * 1000.0f / span.count();
+    }
+    render_fps(fps);
+    //render_center_cross();
+}
+//===============================================
 
 void video_callback(const uint8_t* data, size_t size, bool vsync, uint8_t count) {
     std::lock_guard<std::mutex> lock(queue_mutex);
@@ -62,8 +150,8 @@ void decoder_thread() {
         SDL_Quit();
         return ;
     }
-    SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
-    if (!renderer) {
+    renderer_ = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
+    if (!renderer_) {
         std::cerr << "Renderer creation failed: " << SDL_GetError() << std::endl;
         SDL_DestroyWindow(window);
         TTF_Quit();
@@ -84,13 +172,12 @@ void decoder_thread() {
         std::cout << "Object detection model not loaded. Tracking disabled." << std::endl;
     }
 
-    // Create helper objects
-    SDLRenderer sdl_renderer(renderer, font, screen_w, screen_h);
-    HUDOverlay hud(renderer, font);
+    hud.init(renderer_, font);
 
     ImageBuffer current_packet;  // Buffer for current packet
     uint8_t counter = 0;
     std::vector<uint8_t> img_buffer;
+    uint32_t broken_img = 0;
     while (running) {
         {
             std::unique_lock<std::mutex> lock(queue_mutex);
@@ -110,11 +197,13 @@ void decoder_thread() {
             if ((current_packet.count == 0) && (!img_buffer.empty())){//missing vsync broken img
                 img_buffer.clear();
                 counter = 0;
-                printf("missing vsync \n");
+                broken_img++;
             }
+
             // Append current packet to image buffer
             img_buffer.insert(img_buffer.end(), current_packet.buffer.begin(), current_packet.buffer.end());
             counter++;
+
             if (current_packet.can_decode){
                 if (counter == (current_packet.count+1)){//able to decode
                     // Decode JPEG using libjpeg-turbo
@@ -126,8 +215,8 @@ void decoder_thread() {
 
                     std::vector<uint8_t> rgb(width * height * 3);
                     if (tjDecompress2(tj_instance_, img_buffer.data(), img_buffer.size(), rgb.data(), width, 0, height, TJPF_RGB, TJFLAG_FASTDCT) != 0) {
-                        std::cerr << "JPEG decode failed: " << tjGetErrorStr() << std::endl;
-                        //continue;
+                        std::cerr << "JPEG decode failed: " << tjGetErrorStr() << "plz check cam pclk" << std::endl;
+                        continue;
                     }
 
                     // Get decoded frame
@@ -136,48 +225,15 @@ void decoder_thread() {
                     //auto objects = object_detector.detect(cv_frame);
                     // TODO: draw bounding boxes if enabled
 
-                    int render_mode = g_osd_menu.getRenderMode();
-                    hud.setRenderMode(render_mode);
+                    // Render frame
+                    render_frame(rgb, width, height);
+                    hud.render(screen_w, screen_h);
+                    hud.draw(screen_w, screen_h);//menu
 
-                    if (render_mode == 0) {  // Graphic HUD
-                        std::lock_guard<std::mutex> lock(g_osd_mutex);
-                        // 单位转换：MSP数据 → 显示单位
-                        float speed = g_osd.gps_speed * 0.036f;          // cm/s -> km/h
-                        float alt = g_osd.altitude / 100.0f;             // cm -> m
-                        float heading = g_osd.yaw * 0.01f;                // 0.01° -> °
-                        float pitch_deg = g_osd.pitch * 0.01f;
-                        float roll_deg = g_osd.roll * 0.01f;
-                        float pitch_rad = pitch_deg * M_PI / 180.0f;      // ° -> rad
-                        float roll_rad = roll_deg * M_PI / 180.0f;
-
-                        // 预测值（示例，可从其他来源获取）
-                        float pred_speed = speed + 5;
-                        float pred_alt = alt + 10;
-                        float pred_heading = heading + 2;
-
-                        hud.updateFlightData(speed, alt, heading, pitch_rad, roll_rad,
-                                            pred_speed, pred_alt, pred_heading);
-                    } else {  // Text OSD
-                        std::vector<std::string> lines;
-                        int rows = g_osd_screen.rows();
-                        for (int r = 0; r < rows; ++r) {
-                            std::string row_text = g_osd_screen.getRow(r);
-                            // 如果整行都是空格，可以跳过，但保留空行也可以
-                            lines.push_back(row_text);
-                        }
-                        hud.setTextLines(lines);
-                        hud.renderOSD(g_osd_screen, screen_w, screen_h);
-                    }
-
-                        hud.setConfig(g_osd_menu.getHUDConfig());
-
-                        // Render frame
-                        sdl_renderer.render_frame(rgb, width, height);
-                        hud.render(screen_w, screen_h);
-                        g_osd_menu.draw(renderer, width, height, font);
-                        SDL_RenderPresent(renderer);
+                    SDL_RenderPresent(renderer_);
                 } else {
-                  printf("broken img %d  %d\n", counter, current_packet.count+1);
+                    broken_img++;
+                    //printf("broken img %d  %d\n", counter, current_packet.count+1);
                 }
 
                 counter = 0;
@@ -188,30 +244,33 @@ void decoder_thread() {
             // Show "Waiting for video"
             if (font) {
                 SDL_Color white = {255,255,255,255};
-                SDL_Surface* surf = TTF_RenderText_Solid(font, "No IMG", white);
+                SDL_Surface* surf = TTF_RenderText_Solid(font, "No Img", white);
                 if (surf) {
-                    SDL_Texture* tex = SDL_CreateTextureFromSurface(renderer, surf);
+                    SDL_Texture* tex = SDL_CreateTextureFromSurface(renderer_, surf);
                     SDL_Rect dst = {screen_w/2 - surf->w/2, screen_h/2 - surf->h/2, surf->w, surf->h};
-                    SDL_RenderCopy(renderer, tex, NULL, &dst);
+                    SDL_RenderCopy(renderer_, tex, NULL, &dst);
                     SDL_DestroyTexture(tex);
                     SDL_FreeSurface(surf);
                 }
             }
-            g_osd_menu.draw(renderer, screen_w, screen_h, font);
-            SDL_RenderPresent(renderer);
+            hud.draw(screen_w, screen_h);
+            SDL_RenderPresent(renderer_);
         }
     }
 
     if (font) TTF_CloseFont(font);
-    SDL_DestroyRenderer(renderer);
+    SDL_DestroyRenderer(renderer_);
     SDL_DestroyWindow(window);
     TTF_Quit();
     SDL_Quit();
 
     if (tj_instance_) tjDestroy(tj_instance_);
+
+    std::cout << "broken img count:" << broken_img << std::endl;
 }
 
 void video_stop() {
     running = false;
     pack_buffer_cv_.notify_all();
+    if (frame_texture_) SDL_DestroyTexture(frame_texture_);
 }

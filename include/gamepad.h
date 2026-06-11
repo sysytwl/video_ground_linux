@@ -15,7 +15,6 @@ public:
 
 private:
     SDL_GameController* controller_ = nullptr;
-    GamepadState state_;
     uint16_t GamepadState[16] = {0};
 };
 

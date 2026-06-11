@@ -4,36 +4,129 @@
 #include <SDL.h>
 #include <SDL_ttf.h>
 #include <SDL2_gfxPrimitives.h>
+#include <SDL_image.h>
 #include <string>
 #include <vector>
-#include <SDL_image.h>
-#include "msp.h"
+#include <mutex>
+#include <atomic>
+#include <memory>
 
-struct HUDConfig {
-    bool show_speed = true;
-    bool show_altitude = true;
-    bool show_heading = true;
-    bool show_attitude = true;
-    bool show_ground = true;
-    bool show_predicted = true;
-    bool show_air_ground_line = true;
-    bool show_object_labels = true;
+enum RenderMode {
+    RENDER_GRAPHIC = 0,
+    RENDER_TEXT = 1
+};
+
+struct MenuItem {
+    std::string name;
+    std::vector<std::string> options;
+    size_t selected = 0;
+    bool editable = true;
+};
+
+enum hud_overlay_menu{
+    mode = 0,
+    interface,
+    mac,
+    start,
+    speed,
+    alt,
+    heading,
+    attitude,
+    predicted,
+};
+
+MenuItem menu_items_[] = {
+    [mode]= {
+        .name = "Mode",
+        .options = {"Graphic HUD", "Text OSD"},
+        .selected = 1,
+        .editable = true,
+    },
+
+    [interface]={
+        .name = "Interface",
+        .options = {"wlan0mon"},
+        .selected = 0,
+        .editable = true,
+    },
+
+    [mac]={
+        .name = "MAC Filter",
+        .options = {"All"},
+        .selected = 0,
+        .editable = true,
+    },
+
+    [start]={
+        .name = "Control",
+        .options = {"Start Capture",  "Stop Capture"},
+        .selected = 0,
+        .editable = true,
+    },
+
+    [speed]={
+        .name = "Show Speed",
+        .options = {"Off","On"},
+        .selected = 0,
+        .editable = true,
+    },
+
+    [alt]={
+        .name = "Show Altitude",
+        .options = {"Off","On"},
+        .selected = 0,
+        .editable = true,
+    },
+
+    [heading]={
+        .name = "Show Heading",
+        .options = {"Off","On"},
+        .selected = 0,
+        .editable = true,
+    },
+
+    [attitude]={
+        .name = "Show Attitude",
+        .options = {"Off","On"},
+        .selected = 0,
+        .editable = true,
+    },
+
+    [predicted]={
+        .name = "Show Predicted",
+        .options = {"Off","On"},
+        .selected = 0,
+        .editable = true,
+    },
 };
 
 class HUDOverlay {
 public:
-    HUDOverlay(SDL_Renderer* renderer, TTF_Font* font);
+    HUDOverlay();
     ~HUDOverlay();
 
-    void setConfig(const HUDConfig& cfg) { config_ = cfg; }
-    void updateFlightData(float speed, float altitude, float heading,
-                          float pitch, float roll,
-                          float predicted_speed, float predicted_altitude,
-                          float predicted_heading);
+    void init(SDL_Renderer* renderer, TTF_Font* font);
+
+    void updateFlightData(float speed, float altitude, float heading,float pitch, float roll,float predicted_speed, float predicted_altitude,float predicted_heading);
     void render(int screen_w, int screen_h);
     void setRenderMode(int mode) { render_mode_ = mode; }
     void setTextLines(const std::vector<std::string>& lines) { text_lines_ = lines; }
-    void renderOSD(const OSDScreen& screen, int screen_w, int screen_h);
+
+    void draw(int width, int height);
+    void set_available_interfaces(const std::vector<std::string>& interfaces);
+    void set_discovered_macs(const std::vector<std::string>& macs);
+
+    void navigate_up();
+    void navigate_down();
+    void navigate_left();
+    void navigate_right();
+    void toggle_menu();
+    RenderMode getRenderMode() const;
+
+    std::string get_selected_interface() const;
+    std::string get_selected_mac() const;
+    bool should_start_capture() const;
+
 private:
     void drawSpeedTape(int x, int y, int w, int h);
     void drawAltitudeTape(int x, int y, int w, int h);
@@ -42,7 +135,6 @@ private:
 
     SDL_Renderer* renderer_;
     TTF_Font* font_;
-    HUDConfig config_;
 
     int render_mode_ = 0;  // 0: graphic, 1: text
     std::vector<std::string> text_lines_;
@@ -59,6 +151,16 @@ private:
 
     SDL_Color getColorForAttr(uint8_t attr);
     bool isBlinking(uint8_t attr);
+
+    size_t selected_item_ = 0;
+    bool menu_visible_ = true;
+    mutable std::mutex menu_mutex_;
+
+    std::vector<std::string> available_interfaces_;
+    std::vector<std::string> discovered_macs_;
+
+    void populate_menu();
+    void handle_toggle(MenuItem& item);
 };
 
 #endif
