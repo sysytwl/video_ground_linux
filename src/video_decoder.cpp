@@ -107,40 +107,37 @@ void packet_assembler_thread() {
         counter++;
 
         if (packet.can_decode) {
-            if (counter == static_cast<int>(packet.count) + 1) {
-                std::vector<uint8_t> completed_image;
-                completed_image.swap(img_buffer);
-                
+            if (counter == packet.count + 1) {
                 // Decode the completed JPEG
-                if (!completed_image.empty() && tj_instance_) {
-                    int width = 0, height = 0, subsamp = 0;
-                    if (tjDecompressHeader2(tj_instance_, completed_image.data(), completed_image.size(), &width, &height, &subsamp) == 0) {
-                        std::vector<uint8_t> rgb;
-                        try {
-                            rgb.resize(width * height * 3);
-                        } catch (...) {
-                            broken_img++;
-                            rgb.clear();
-                        }
+                // if (!img_buffer.empty() && tj_instance_) {
+                int width = 0, height = 0, subsamp = 0;
+                if (tjDecompressHeader2(tj_instance_, img_buffer.data(), img_buffer.size(), &width, &height, &subsamp) == 0) {
+                    std::vector<uint8_t> rgb;
+                    try {
+                        rgb.resize(width * height * 3);
+                    } catch (...) {
+                        rgb.clear();
+                        continue;
+                    }
 
-                        if (!rgb.empty()) {
-                            if (tjDecompress2(tj_instance_, completed_image.data(), completed_image.size(), rgb.data(), width, 0, height, TJPF_RGB, TJFLAG_FASTDCT) == 0) {
-                                std::lock_guard<std::mutex> lock(decoded_mutex);
-                                latest_decoded_frame = DecodedFrame{std::move(rgb), width, height, std::chrono::steady_clock::now()};
-                            } else {
-                                broken_img++;
-                            }
-                        }
+                    // if (!rgb.empty()) {
+                    if (tjDecompress2(tj_instance_, img_buffer.data(), img_buffer.size(), rgb.data(), width, 0, height, TJPF_RGB, TJFLAG_FASTDCT) == 0) {
+                        std::lock_guard<std::mutex> lock(decoded_mutex);
+                        latest_decoded_frame = DecodedFrame{std::move(rgb), width, height, std::chrono::steady_clock::now()};
                     } else {
                         broken_img++;
                     }
+                    // }
                 } else {
                     broken_img++;
                 }
+                // } else {
+                //     broken_img++;
+                // }
             } else {
                 broken_img++;
-                img_buffer.clear();
             }
+
             counter = 0;
             img_buffer.clear();
         }
