@@ -16,6 +16,11 @@ enum RenderMode {
     RENDER_TEXT = 1
 };
 
+enum DisplayMode {
+    DISPLAY_NORMAL = 0,
+    DISPLAY_SIDE_BY_SIDE = 1
+};
+
 struct MenuItem {
     std::string name;
     std::vector<std::string> options;
@@ -24,7 +29,8 @@ struct MenuItem {
 };
 
 enum hud_overlay_menu{
-    mode = 0,
+    display_mode = 0,
+    osd_mode,
     interface,
     mac,
     start,
@@ -33,72 +39,10 @@ enum hud_overlay_menu{
     heading,
     attitude,
     predicted,
+    menu_items_count
 };
 
-MenuItem menu_items_[] = {
-    [mode]= {
-        .name = "Mode",
-        .options = {"Graphic HUD", "Text OSD"},
-        .selected = 1,
-        .editable = true,
-    },
-
-    [interface]={
-        .name = "Interface",
-        .options = {"wlan0mon"},
-        .selected = 0,
-        .editable = true,
-    },
-
-    [mac]={
-        .name = "MAC Filter",
-        .options = {"All"},
-        .selected = 0,
-        .editable = true,
-    },
-
-    [start]={
-        .name = "Control",
-        .options = {"Start Capture",  "Stop Capture"},
-        .selected = 0,
-        .editable = true,
-    },
-
-    [speed]={
-        .name = "Show Speed",
-        .options = {"Off","On"},
-        .selected = 0,
-        .editable = true,
-    },
-
-    [alt]={
-        .name = "Show Altitude",
-        .options = {"Off","On"},
-        .selected = 0,
-        .editable = true,
-    },
-
-    [heading]={
-        .name = "Show Heading",
-        .options = {"Off","On"},
-        .selected = 0,
-        .editable = true,
-    },
-
-    [attitude]={
-        .name = "Show Attitude",
-        .options = {"Off","On"},
-        .selected = 0,
-        .editable = true,
-    },
-
-    [predicted]={
-        .name = "Show Predicted",
-        .options = {"Off","On"},
-        .selected = 0,
-        .editable = true,
-    },
-};
+extern MenuItem menu_items_[];
 
 class HUDOverlay {
 public:
@@ -109,8 +53,9 @@ public:
 
     void updateFlightData(float speed, float altitude, float heading,float pitch, float roll,float predicted_speed, float predicted_altitude,float predicted_heading);
     void render(int screen_w, int screen_h);
-    void setRenderMode(int mode) { render_mode_ = mode; }
-    void setTextLines(const std::vector<std::string>& lines) { text_lines_ = lines; }
+    void setRenderMode(int mode) { menu_items_[osd_mode].selected = mode; invalidateOSDTexture(); }
+    void setTextLines(const std::vector<std::string>& lines) { text_lines_ = lines; invalidateOSDTexture(); }
+    DisplayMode getDisplayMode() const;
 
     void draw(int width, int height);
     void set_available_interfaces(const std::vector<std::string>& interfaces);
@@ -136,13 +81,18 @@ private:
     SDL_Renderer* renderer_;
     TTF_Font* font_;
 
-    int render_mode_ = 0;  // 0: graphic, 1: text
     std::vector<std::string> text_lines_;
     float speed_, altitude_, heading_;
     float pitch_, roll_;
     float pred_speed_, pred_alt_, pred_heading_;
 
     SDL_Texture* osd_font_atlas_ = nullptr;
+    SDL_Texture* osd_texture_ = nullptr;
+    bool osd_texture_dirty_ = true;
+    int osd_texture_w_ = 0;
+    int osd_texture_h_ = 0;
+    int render_mode_ = RENDER_GRAPHIC;
+
     int osd_tile_w_ = 12;          // original tile width
     int osd_tile_h_ = 18;          // original tile height
     int osd_scale_ = 2;            // scaling factor for rendering
@@ -151,6 +101,10 @@ private:
 
     SDL_Color getColorForAttr(uint8_t attr);
     bool isBlinking(uint8_t attr);
+    void invalidateOSDTexture();
+    void ensureOSDTexture(int screen_w, int screen_h);
+    void renderOSDToTexture(int screen_w, int screen_h);
+    void destroyOSDTexture();
 
     size_t selected_item_ = 0;
     bool menu_visible_ = true;

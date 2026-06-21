@@ -3,12 +3,129 @@
 #include <sstream>
 #include "msp.h"
 
+MenuItem menu_items_[] = {
+    [display_mode] = {
+        .name = "Display Mode",
+        .options = {"Normal", "Side-by-Side"},
+        .selected = 0,
+        .editable = true,
+    },
+    [osd_mode] = {
+        .name = "OSD Mode",
+        .options = {"Graphic HUD", "Text OSD"},
+        .selected = 0,
+        .editable = true,
+    },
+    [interface] = {
+        .name = "Interface",
+        .options = {"wlan0mon"},
+        .selected = 0,
+        .editable = true,
+    },
+    [mac] = {
+        .name = "MAC Filter",
+        .options = {"All"},
+        .selected = 0,
+        .editable = true,
+    },
+    [start] = {
+        .name = "Control",
+        .options = {"Start Capture", "Stop Capture"},
+        .selected = 0,
+        .editable = true,
+    },
+    [speed] = {
+        .name = "Show Speed",
+        .options = {"Off", "On"},
+        .selected = 0,
+        .editable = true,
+    },
+    [alt] = {
+        .name = "Show Altitude",
+        .options = {"Off", "On"},
+        .selected = 0,
+        .editable = true,
+    },
+    [heading] = {
+        .name = "Show Heading",
+        .options = {"Off", "On"},
+        .selected = 0,
+        .editable = true,
+    },
+    [attitude] = {
+        .name = "Show Attitude",
+        .options = {"Off", "On"},
+        .selected = 0,
+        .editable = true,
+    },
+    [predicted] = {
+        .name = "Show Predicted",
+        .options = {"Off", "On"},
+        .selected = 0,
+        .editable = true,
+    },
+};
+
+void HUDOverlay::populate_menu() {
+    // Ensure menu selections are initialized and options are valid.
+    menu_items_[display_mode].name = "Display Mode";
+    menu_items_[display_mode].options = {"Normal", "Side-by-Side"};
+    menu_items_[display_mode].selected = 0;
+    menu_items_[display_mode].editable = true;
+
+    menu_items_[osd_mode].name = "OSD Mode";
+    menu_items_[osd_mode].options = {"Graphic HUD", "Text OSD"};
+    menu_items_[osd_mode].selected = 0;
+    menu_items_[osd_mode].editable = true;
+
+    menu_items_[interface].name = "Interface";
+    menu_items_[interface].options = {"wlan0mon"};
+    menu_items_[interface].selected = 0;
+    menu_items_[interface].editable = true;
+
+    menu_items_[mac].name = "MAC Filter";
+    menu_items_[mac].options = {"All"};
+    menu_items_[mac].selected = 0;
+    menu_items_[mac].editable = true;
+
+    menu_items_[start].name = "Control";
+    menu_items_[start].options = {"Start Capture", "Stop Capture"};
+    menu_items_[start].selected = 0;
+    menu_items_[start].editable = true;
+
+    menu_items_[speed].name = "Show Speed";
+    menu_items_[speed].options = {"Off", "On"};
+    menu_items_[speed].selected = 0;
+    menu_items_[speed].editable = true;
+
+    menu_items_[alt].name = "Show Altitude";
+    menu_items_[alt].options = {"Off", "On"};
+    menu_items_[alt].selected = 0;
+    menu_items_[alt].editable = true;
+
+    menu_items_[heading].name = "Show Heading";
+    menu_items_[heading].options = {"Off", "On"};
+    menu_items_[heading].selected = 0;
+    menu_items_[heading].editable = true;
+
+    menu_items_[attitude].name = "Show Attitude";
+    menu_items_[attitude].options = {"Off", "On"};
+    menu_items_[attitude].selected = 0;
+    menu_items_[attitude].editable = true;
+
+    menu_items_[predicted].name = "Show Predicted";
+    menu_items_[predicted].options = {"Off", "On"};
+    menu_items_[predicted].selected = 0;
+    menu_items_[predicted].editable = true;
+}
+
 HUDOverlay::HUDOverlay() {
     populate_menu();
 }
 
 HUDOverlay::~HUDOverlay() {
     if (osd_font_atlas_) SDL_DestroyTexture(osd_font_atlas_);
+    destroyOSDTexture();
 }
 
 void HUDOverlay::init(SDL_Renderer* renderer, TTF_Font* font){
@@ -29,6 +146,7 @@ void HUDOverlay::init(SDL_Renderer* renderer, TTF_Font* font){
         SDL_Log("Failed to load betaflight.png: %s", IMG_GetError());
     }
     last_blink_time_ = SDL_GetTicks();
+    osd_texture_dirty_ = true;
 }
 
 void HUDOverlay::updateFlightData(float speed, float altitude, float heading,
@@ -42,94 +160,126 @@ void HUDOverlay::updateFlightData(float speed, float altitude, float heading,
     pred_speed_ = pred_speed;
     pred_alt_ = pred_alt;
     pred_heading_ = pred_heading;
+    invalidateOSDTexture();
 }
 
-void HUDOverlay::render(int screen_w, int screen_h) {                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   
+void HUDOverlay::invalidateOSDTexture() {
+    osd_texture_dirty_ = true;
+}
 
-    if (render_mode_ == 0) {
-        // 图形模式
-        if (menu_items_[speed].selected) drawSpeedTape(50, screen_h/2 - 100, 40, 200);
-        if (menu_items_[alt].selected) drawAltitudeTape(screen_w - 90, screen_h/2 - 100, 40, 200);
-        if (menu_items_[heading].selected) drawHeadingTape(screen_w/2 - 150, screen_h - 60, 300, 40);
-        if (menu_items_[attitude].selected) drawAttitudeIndicator(screen_w/2, screen_h/2, 150);
-    } else {
+void HUDOverlay::destroyOSDTexture() {
+    if (osd_texture_) {
+        SDL_DestroyTexture(osd_texture_);
+        osd_texture_ = nullptr;
+        osd_texture_w_ = 0;
+        osd_texture_h_ = 0;
+    }
+}
 
-        if (!osd_font_atlas_) return;
+DisplayMode HUDOverlay::getDisplayMode() const {
+    if (menu_items_[display_mode].selected == 1) {
+        return DISPLAY_SIDE_BY_SIDE;
+    }
+    return DISPLAY_NORMAL;
+}
 
-        // Update blink state (500 ms period)
+RenderMode HUDOverlay::getRenderMode() const {
+    if (menu_items_[osd_mode].selected == 1) {
+        return RENDER_TEXT;
+    }
+    return RENDER_GRAPHIC;
+}
+
+void HUDOverlay::ensureOSDTexture(int screen_w, int screen_h) {
+    if (!osd_texture_dirty_ && osd_texture_) return;
+    renderOSDToTexture(screen_w, screen_h);
+}
+
+void HUDOverlay::renderOSDToTexture(int screen_w, int screen_h) {
+    if (!renderer_ || !osd_font_atlas_) return;
+    if (osd_texture_) SDL_DestroyTexture(osd_texture_);
+
+    osd_texture_w_ = screen_w;
+    osd_texture_h_ = screen_h;
+    osd_texture_ = SDL_CreateTexture(renderer_, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_TARGET, osd_texture_w_, osd_texture_h_);
+    if (!osd_texture_) return;
+
+    SDL_Texture* prev_target = SDL_GetRenderTarget(renderer_);
+    SDL_SetRenderTarget(renderer_, osd_texture_);
+    SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(renderer_, 0, 0, 0, 0);
+    SDL_RenderClear(renderer_);
+
+    bool is_text_mode = menu_items_[osd_mode].selected == 1;
+    bool is_side_by_side = menu_items_[display_mode].selected == 1;
+    int osd_width = is_side_by_side ? screen_w / 2 : screen_w;
+
+    if (is_text_mode) {
+        if (!osd_font_atlas_) {
+            SDL_SetRenderTarget(renderer_, prev_target);
+            return;
+        }
         Uint32 now = SDL_GetTicks();
         if (now - last_blink_time_ > 500) {
             blink_on_ = !blink_on_;
             last_blink_time_ = now;
         }
+    }
 
-        // Determine character size on screen (scaled)
-        int dst_w = osd_tile_w_ * osd_scale_;
-        int dst_h = osd_tile_h_ * osd_scale_;
+    int dst_w = osd_tile_w_ * osd_scale_;
+    int dst_h = osd_tile_h_ * osd_scale_;
+    int margin = 20;
+    int start_x = margin;
+    int start_y = margin;
+    int rows = g_osd_screen.rows();
+    int cols = g_osd_screen.cols();
 
-        // Starting position (e.g., top-left with margin)
-        int margin = 20;
-        int start_x = margin;
-        int start_y = margin;
-
-        // Iterate over all rows and columns of the screen
-        int rows = g_osd_screen.rows();
-        int cols = g_osd_screen.cols();
+    if (!is_text_mode) {
+        if (menu_items_[speed].selected) drawSpeedTape(50, screen_h/2 - 100, 40, 200);
+        if (menu_items_[alt].selected) drawAltitudeTape(screen_w - 90, screen_h/2 - 100, 40, 200);
+        if (menu_items_[heading].selected) drawHeadingTape(screen_w/2 - 150, screen_h - 60, 300, 40);
+        if (menu_items_[attitude].selected) drawAttitudeIndicator(screen_w/2, screen_h/2, 150);
+    } else {
         for (int r = 0; r < rows; ++r) {
             for (int c = 0; c < cols; ++c) {
-                OSDChar ch = g_osd_screen.getCharAt(r, c); // you need to add this getter in OSDScreen
-                if (ch.character == ' ' && ch.attribute == 0) continue; // skip empty
-
-                // Apply blink: if blinking and current blink off, skip
+                OSDChar ch = g_osd_screen.getCharAt(r, c);
+                if (ch.character == ' ' && ch.attribute == 0) continue;
                 if (isBlinking(ch.attribute) && !blink_on_) continue;
 
-                // Compute source rectangle in atlas
-                int tile_index = ch.character; // 0-255
+                int tile_index = ch.character;
                 int tile_row = tile_index / 16;
                 int tile_col = tile_index % 16;
-                SDL_Rect src = {
-                    tile_col * (osd_tile_w_ + 1), // +1 for the red line gap
-                    tile_row * (osd_tile_h_ + 1),
-                    osd_tile_w_,
-                    osd_tile_h_
-                };
-
-                // Destination rectangle
-                SDL_Rect dst = {
-                    start_x + c * dst_w,
-                    start_y + r * dst_h,
-                    dst_w,
-                    dst_h
-                };
-
-                // Set color modulation based on attribute
+                SDL_Rect src = { tile_col * (osd_tile_w_ + 1), tile_row * (osd_tile_h_ + 1), osd_tile_w_, osd_tile_h_ };
+                SDL_Rect dst = { start_x + c * dst_w, start_y + r * dst_h, dst_w, dst_h };
                 SDL_Color color = getColorForAttr(ch.attribute);
                 SDL_SetTextureColorMod(osd_font_atlas_, color.r, color.g, color.b);
                 SDL_SetTextureAlphaMod(osd_font_atlas_, color.a);
-
-                // Render the tile
                 SDL_RenderCopy(renderer_, osd_font_atlas_, &src, &dst);
             }
         }
-
     }
 
+    SDL_SetRenderTarget(renderer_, prev_target);
+    osd_texture_dirty_ = false;
+}
 
+void HUDOverlay::render(int screen_w, int screen_h) {
+    bool side_by_side = menu_items_[display_mode].selected == 1;
+    int osd_width = side_by_side ? screen_w / 2 : screen_w;
 
-    // std::lock_guard<std::mutex> lock(g_osd_mutex);
-    // // 单位转换：MSP数据 → 显示单位
-    // float speed = g_osd.gps_speed * 0.036f;          // cm/s -> km/h
-    // float alt = g_osd.altitude / 100.0f;             // cm -> m
-    // float heading = g_osd.yaw * 0.01f;                // 0.01° -> °
-    // float pitch_deg = g_osd.pitch * 0.01f;
-    // float roll_deg = g_osd.roll * 0.01f;
-    // float pitch_rad = pitch_deg * M_PI / 180.0f;      // ° -> rad
-    // float roll_rad = roll_deg * M_PI / 180.0f;
+    ensureOSDTexture(osd_width, screen_h);
+    if (!osd_texture_) return;
 
-    // // 预测值（示例，可从其他来源获取）
-    // float pred_speed = speed + 5;
-    // float pred_alt = alt + 10;
-    // float pred_heading = heading + 2;
+    SDL_SetTextureBlendMode(osd_texture_, SDL_BLENDMODE_BLEND);
+    if (side_by_side) {
+        SDL_Rect left_dst = {0, 0, osd_width, screen_h};
+        SDL_Rect right_dst = {screen_w / 2, 0, osd_width, screen_h};
+        SDL_RenderCopy(renderer_, osd_texture_, nullptr, &left_dst);
+        SDL_RenderCopy(renderer_, osd_texture_, nullptr, &right_dst);
+    } else {
+        SDL_Rect dst = {0, 0, osd_width, screen_h};
+        SDL_RenderCopy(renderer_, osd_texture_, nullptr, &dst);
+    }
 }
 
 void HUDOverlay::drawSpeedTape(int x, int y, int w, int h) {
@@ -256,7 +406,7 @@ void HUDOverlay::draw(int width, int height) {
     int start_y = (height - menu_h) / 2;
 
     // Background
-    boxRGBA(renderer_, start_x, start_y, start_x+menu_w, start_y+menu_h, 0,0,0,400);
+    boxRGBA(renderer_, start_x, start_y, start_x+menu_w, start_y+menu_h, 0,0,0,255);
     rectangleRGBA(renderer_, start_x, start_y, start_x+menu_w, start_y+menu_h, 255,255,255,255);
 
     // Title
@@ -272,7 +422,7 @@ void HUDOverlay::draw(int width, int height) {
 
     // Menu items
     int y = start_y + 70;
-    for (size_t i = 0; i < predicted+1; i++) {
+    for (size_t i = 0; i < menu_items_count; i++) {
         const auto& item = menu_items_[i];
         std::string text = item.name + ": " + item.options[item.selected];
         if (i == selected_item_) text = "> " + text;
@@ -319,6 +469,7 @@ void HUDOverlay::navigate_left() {
     auto& item = menu_items_[selected_item_];
     if (item.editable && item.selected > 0) {
         item.selected--;
+        invalidateOSDTexture();
     }
 }
 
@@ -327,6 +478,7 @@ void HUDOverlay::navigate_right() {
     auto& item = menu_items_[selected_item_];
     if (item.editable && item.selected < item.options.size() - 1) {
         item.selected++;
+        invalidateOSDTexture();
     }
 }
 
@@ -337,22 +489,22 @@ void HUDOverlay::toggle_menu() {
 
 std::string HUDOverlay::get_selected_interface() const {
     std::lock_guard<std::mutex> lock(menu_mutex_);
-    if (menu_items_[1].options.size() > menu_items_[1].selected)
-        return menu_items_[1].options[menu_items_[1].selected];
+    if (menu_items_[interface].options.size() > menu_items_[interface].selected)
+        return menu_items_[interface].options[menu_items_[interface].selected];
     return "wlan0mon";
 }
 
 std::string HUDOverlay::get_selected_mac() const {
     std::lock_guard<std::mutex> lock(menu_mutex_);
-    if (menu_items_[2].options.size() > menu_items_[2].selected) {
-        if (menu_items_[2].selected == 0) return "";
-        return menu_items_[2].options[menu_items_[2].selected];
+    if (menu_items_[mac].options.size() > menu_items_[mac].selected) {
+        if (menu_items_[mac].selected == 0) return "";
+        return menu_items_[mac].options[menu_items_[mac].selected];
     }
     return "";
 }
 
 bool HUDOverlay::should_start_capture() const {
     std::lock_guard<std::mutex> lock(menu_mutex_);
-        return menu_items_[3].options[menu_items_[3].selected] == "Stop Capture";
+        return menu_items_[start].options[menu_items_[start].selected] == "Stop Capture";
     return false;
 }
