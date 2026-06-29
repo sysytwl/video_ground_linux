@@ -170,4 +170,9 @@ void msp_parse_bytes(msp_parser_t *parser, const uint8_t *data, size_t len,
 // 全局OSD数据存储（可由回调更新）
 extern osd_data_t g_osd;
 
+// Start/stop MSP serial reader (runs background thread). Device can be overridden
+// via environment variable `MSP_DEVICE`. Returns true on success starting.
+bool msp_start();
+void msp_stop();
+
 #endif

@@ -10,6 +10,8 @@
 #include <mutex>
 #include <atomic>
 #include <memory>
+#include <thread>
+#include <condition_variable>
 
 enum RenderMode {
     RENDER_GRAPHIC = 0,
@@ -52,11 +54,23 @@ public:
     void init(SDL_Renderer* renderer, TTF_Font* font);
 
     void updateFlightData(float speed, float altitude, float heading,float pitch, float roll,float predicted_speed, float predicted_altitude,float predicted_heading);
-    void render(int screen_w, int screen_h);
+    // Return current OSD texture (may be null)
+    SDL_Texture* getOSDTexture() const;
+    int getOSDWidth() const;
+    int getOSDHeight() const;
+    // Force update OSD texture immediately (blocking). Must be called from the thread that owns the renderer.
+    void updateOSDTextureBlocking(int screen_w, int screen_h);
+    bool isOSDTextureDirty() const;
+    // Fetch latest pixel buffer (RGBA). Returns true if pixels were copied.
+    bool fetchOSDPixels(std::vector<uint8_t>& out_pixels, int& out_w, int& out_h);
+    // Called from main/render thread to upload latest pixel buffer into osd_texture_.
+    bool applyOSDPixelsOnMainThread();
+    void invalidateOSDTexture();
     void setRenderMode(int mode) { menu_items_[osd_mode].selected = mode; invalidateOSDTexture(); }
-    void setTextLines(const std::vector<std::string>& lines) { text_lines_ = lines; invalidateOSDTexture(); }
     DisplayMode getDisplayMode() const;
 
+    // Draw decoded OSD onto the current render target.
+    void renderOSD(int width, int height);
     void draw(int width, int height);
     void set_available_interfaces(const std::vector<std::string>& interfaces);
     void set_discovered_macs(const std::vector<std::string>& macs);
@@ -81,7 +95,6 @@ private:
     SDL_Renderer* renderer_;
     TTF_Font* font_;
 
-    std::vector<std::string> text_lines_;
     float speed_, altitude_, heading_;
     float pitch_, roll_;
     float pred_speed_, pred_alt_, pred_heading_;
@@ -89,9 +102,17 @@ private:
     SDL_Texture* osd_font_atlas_ = nullptr;
     SDL_Texture* osd_texture_ = nullptr;
     bool osd_texture_dirty_ = true;
+    // Asynchronous pixel buffer for OSD
+    std::vector<uint8_t> osd_pixels_; // RGBA
+    mutable std::mutex osd_pixels_mutex_;
+    std::atomic<bool> osd_pixels_ready_{false};
+    std::atomic<bool> osd_thread_running_{false};
+    std::thread osd_worker_thread_;
+    std::condition_variable osd_update_cv_;
+    std::mutex osd_update_mutex_;
+    SDL_Surface* osd_font_atlas_surf_ = nullptr; // keep surface for software blitting
     int osd_texture_w_ = 0;
     int osd_texture_h_ = 0;
-    int render_mode_ = RENDER_GRAPHIC;
 
     int osd_tile_w_ = 12;          // original tile width
     int osd_tile_h_ = 18;          // original tile height
@@ -101,10 +122,11 @@ private:
 
     SDL_Color getColorForAttr(uint8_t attr);
     bool isBlinking(uint8_t attr);
-    void invalidateOSDTexture();
-    void ensureOSDTexture(int screen_w, int screen_h);
+    void drawOSDContent(int screen_w, int screen_h);
     void renderOSDToTexture(int screen_w, int screen_h);
     void destroyOSDTexture();
+    void startOSDWorker();
+    void stopOSDWorker();
 
     size_t selected_item_ = 0;
     bool menu_visible_ = true;
@@ -113,8 +135,6 @@ private:
     std::vector<std::string> available_interfaces_;
     std::vector<std::string> discovered_macs_;
 
-    void populate_menu();
-    void handle_toggle(MenuItem& item);
 };
 
 #endif

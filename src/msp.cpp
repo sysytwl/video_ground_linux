@@ -2,6 +2,17 @@
 #include "msp.h"
 #include <string.h>
 #include <stdio.h>
+#include <fcntl.h>
+#include <termios.h>
+#include <unistd.h>
+#include <thread>
+#include <atomic>
+#include <chrono>
+#include <cstdlib>
+#include <cerrno>
+#include "hud_overlay.h"
+
+extern HUDOverlay hud;
 
 osd_data_t g_osd = {0};
 
@@ -73,6 +84,7 @@ static void handle_v1_packet(msp_parser_t *parser, uint8_t checksum, msp_osd_cal
         if (parser->expected_len >= 2) {
             g_osd_screen.setSize(parser->in_buf[0], parser->in_buf[1]);
         }
+        hud.invalidateOSDTexture();
         break;
 
     case MSP_DISPLAYPORT:{
@@ -90,10 +102,12 @@ static void handle_v1_packet(msp_parser_t *parser, uint8_t checksum, msp_osd_cal
             if (str_len > 0) {
                 g_osd_screen.writeString(row, col, attr, &parser->in_buf[4], str_len);
             }
+            hud.invalidateOSDTexture();
             break;
         }
         case MSP_DP_CLEAR_SCREEN:
             g_osd_screen.clear();
+            hud.invalidateOSDTexture();
             break;
         case MSP_DP_HEARTBEAT:
             // 心跳，可忽略或用于重置超时
@@ -121,17 +135,15 @@ void msp_parse_bytes(msp_parser_t *parser, const uint8_t *data, size_t len,
             break;
         case MSP_STATE_HEADER_START:
             if (c == 'M') {
-                parser->state = MSP_STATE_HEADER_ARROW;
+                parser->state = MSP_STATE_HEADER_M;
             } else if (c == 'X') {
-                // V2，此处简化处理，先跳过
-                parser->state = MSP_STATE_IDLE; // 暂不支持V2
+                parser->state = MSP_STATE_IDLE;
             } else {
                 parser->state = MSP_STATE_IDLE;
             }
             break;
-        case MSP_STATE_HEADER_ARROW:
+        case MSP_STATE_HEADER_M:
             if (c == '<' || c == '>') {
-                // 方向，我们只关心飞控发来的（>），但也可都接收
                 parser->state = MSP_STATE_V1_ID;
             } else {
                 parser->state = MSP_STATE_IDLE;
@@ -175,3 +187,67 @@ void msp_parse_bytes(msp_parser_t *parser, const uint8_t *data, size_t len,
 // msp.cpp 末尾追加
 
 OSDScreen g_osd_screen;   // 定义全局屏幕
+
+static std::thread msp_thread;
+static std::atomic<bool> msp_thread_running{false};
+
+static void msp_thread_func(const char *device) {
+    msp_parser_t parser;
+    msp_parser_init(&parser);
+
+    int fd = open(device, O_RDWR | O_NOCTTY | O_SYNC);
+    if (fd < 0) {
+        perror("open msp device");
+        return;
+    }
+
+    struct termios tio;
+    if (tcgetattr(fd, &tio) != 0) {
+        perror("tcgetattr");
+        close(fd);
+        return;
+    }
+    cfmakeraw(&tio);
+    cfsetispeed(&tio, B115200);
+    cfsetospeed(&tio, B115200);
+    tio.c_cflag |= CLOCAL | CREAD;
+    tio.c_cflag &= ~CRTSCTS;
+    tio.c_cc[VMIN] = 1;
+    tio.c_cc[VTIME] = 0;
+    tcsetattr(fd, TCSANOW, &tio);
+    tcflush(fd, TCIFLUSH);
+
+    constexpr size_t BUFSZ = 512;
+    uint8_t buf[BUFSZ];
+    while (msp_thread_running) {
+        ssize_t n = read(fd, buf, BUFSZ);
+        if (n > 0) {
+            msp_parse_bytes(&parser, buf, (size_t)n, nullptr, nullptr);
+        } else if (n < 0 && errno != EAGAIN && errno != EINTR) {
+            break;
+        } else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    }
+
+    close(fd);
+}
+
+bool msp_start() {
+    if (msp_thread_running) return true;
+    const char* dev = std::getenv("MSP_DEVICE");
+    const char* candidates[] = {dev ? dev : "", "/dev/ttyUSB0", "/dev/ttyACM0", "/dev/ttyUSB1"};
+    for (const char* device : candidates) {
+        if (device == nullptr || *device == '\0') continue;
+        msp_thread_running = true;
+        msp_thread = std::thread(msp_thread_func, device);
+        return true;
+    }
+    return false;
+}
+
+void msp_stop() {
+    if (!msp_thread_running) return;
+    msp_thread_running = false;
+    if (msp_thread.joinable()) msp_thread.join();
+}

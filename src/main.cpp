@@ -8,6 +8,7 @@
 #include "packet_sniffer.h"
 #include "gamepad.h"
 #include "video_decoder.h"
+#include "msp.h"
 #include "hud_overlay.h"
 
 // Global instances
@@ -79,6 +80,11 @@ int main(int argc, char* argv[]) {
     auto interfaces = discover_interfaces();
     hud.set_available_interfaces(interfaces);
 
+        // Start MSP serial reader (hard-coded device unless MSP_DEVICE env set)
+        if (!msp_start()) {
+            std::cerr << "Warning: msp_start() failed to start serial reader" << std::endl;
+        }
+
     std::vector<std::string> macs = {"94:b5:55:26:e2:ff", "58:bf:25:1b:07:cb"};
     hud.set_discovered_macs(macs);
 
@@ -111,6 +117,7 @@ int main(int argc, char* argv[]) {
 
     // Cleanup
     sniffer.stop_capture();
+        msp_stop();
     video_stop();
     if (img_decode_thread.joinable()) img_decode_thread.join();
     if (osd_control_thread.joinable()) osd_control_thread.join();
