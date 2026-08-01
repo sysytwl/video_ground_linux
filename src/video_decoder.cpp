@@ -127,7 +127,8 @@ void render_frame_to_target(int width, int height) {
     SDL_SetRenderDrawColor(renderer_, 0, 0, 0, 255);
     SDL_RenderClear(renderer_);
 
-    if (frame_texture_ && width > 0 && height > 0) {
+    SDL_Rect dst_rect = {0, 0, viewport_width, viewport_height};
+    if (frame_texture_ && width > 0 && height > 0) {// cp to output texture with aspect ratio preserved
         const float scale_x = static_cast<float>(viewport_width) / static_cast<float>(width);
         const float scale_y = static_cast<float>(viewport_height) / static_cast<float>(height);
         const float scale = std::min(scale_x, scale_y);
@@ -135,15 +136,20 @@ void render_frame_to_target(int width, int height) {
         const int disp_h = static_cast<int>(height * scale);
         const int disp_x = (viewport_width - disp_w) / 2;
         const int disp_y = (viewport_height - disp_h) / 2;
-        SDL_Rect dst_rect = {disp_x, disp_y, disp_w, disp_h};
+        dst_rect = {disp_x, disp_y, disp_w, disp_h};
         SDL_RenderCopy(renderer_, frame_texture_, nullptr, &dst_rect);
     }
 
-    hud.renderOSD(viewport_width, viewport_height);
+    SDL_Rect prev_viewport;
+    SDL_RenderGetViewport(renderer_, &prev_viewport);
+    SDL_RenderSetViewport(renderer_, &dst_rect);
+    hud.renderOSD(dst_rect.w, dst_rect.h);
+    SDL_RenderSetViewport(renderer_, &prev_viewport);
 
-    SDL_SetRenderTarget(renderer_, nullptr);
+    SDL_SetRenderTarget(renderer_, nullptr);// back to default render target (window)
     SDL_SetRenderDrawColor(renderer_, 0, 0, 0, 255);
     SDL_RenderClear(renderer_);
+
     if (side_by_side) {
         SDL_Rect left_dst = {0, 0, viewport_width, viewport_height};
         SDL_Rect right_dst = {viewport_width, 0, viewport_width, viewport_height};
@@ -152,7 +158,7 @@ void render_frame_to_target(int width, int height) {
     } else {
         SDL_RenderCopy(renderer_, output_texture_, nullptr, nullptr);
     }
-    
+
     render_fps(current_fps_);
 
     hud.draw(screen_width_, screen_height_);
