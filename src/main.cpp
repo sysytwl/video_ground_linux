@@ -26,6 +26,34 @@ void signal_handler(int sig) {
 // Function to handle OSD updates based on gamepad input
 void handle_osd_controls() {
     while (g_running) {
+        SDL_Event e;
+        while(SDL_PollEvent(&e)  && g_running){
+            if (e.type == SDL_KEYDOWN) {
+                switch (e.key.keysym.sym) {
+                    case SDLK_ESCAPE:
+                        signal_handler(SIGTERM);
+                        break;
+                    case SDLK_m:
+                        hud.toggle_menu();
+                        break;
+                    case SDLK_UP:
+                        hud.navigate_up();
+                        break;
+                    case SDLK_DOWN:
+                        hud.navigate_down();
+                        break;
+                    case SDLK_LEFT:
+                        hud.navigate_left();
+                        break;
+                    case SDLK_RIGHT:
+                        hud.navigate_right();
+                        break;
+                    default:
+                        break;
+                }
+            }
+        }
+
         gamepad.update();
 
         // Handle D-pad navigation
@@ -94,13 +122,13 @@ int main(int argc, char* argv[]) {
     std::thread img_decode_thread(decoder_thread);
 
     while (g_running) {
-        SDL_Event e;
-        while (SDL_PollEvent(&e) && g_running) {
-            if (e.type == SDL_QUIT) g_running = false;
-            else if (e.type == SDL_KEYDOWN) {
-                if (e.key.keysym.sym == SDLK_ESCAPE) g_running = false;
-            }
-        }
+        // SDL_Event e;
+        // while (SDL_PollEvent(&e) && g_running) {
+        //     if (e.type == SDL_QUIT) g_running = false;
+        //     else if (e.type == SDL_KEYDOWN) {
+        //         if (e.key.keysym.sym == SDLK_ESCAPE) g_running = false;
+        //     }
+        // }
 
         // Check if we should start capture
         if (hud.should_start_capture()) {
