@@ -20,7 +20,7 @@
 #include "turbojpeg.h"
 #include "video_decoder.h"
 
-
+extern std::atomic<bool> g_running;
 extern HUDOverlay hud;
 
 struct ImageBuffer {
@@ -298,7 +298,41 @@ void decoder_thread() {
     auto last_refresh = std::chrono::steady_clock::now();
     const auto refresh_interval = std::chrono::milliseconds(SCREEN_REFRESH_MS);
 
-    while (running) {
+    while (running && g_running) {
+        SDL_Event e;
+        while (SDL_PollEvent(&e)) {
+            if (e.type == SDL_QUIT) {
+                g_running = false;
+                running = false;
+                break;
+            }
+            if (e.type == SDL_KEYDOWN) {
+                switch (e.key.keysym.sym) {
+                    case SDLK_ESCAPE:
+                        g_running = false;
+                        running = false;
+                        break;
+                    case SDLK_m:
+                        hud.toggle_menu();
+                        break;
+                    case SDLK_UP:
+                        hud.navigate_up();
+                        break;
+                    case SDLK_DOWN:
+                        hud.navigate_down();
+                        break;
+                    case SDLK_LEFT:
+                        hud.navigate_left();
+                        break;
+                    case SDLK_RIGHT:
+                        hud.navigate_right();
+                        break;
+                    default:
+                        break;
+                }
+            }
+        }
+
         auto now = std::chrono::steady_clock::now();
         if (now - last_refresh >= refresh_interval) {
             last_refresh = now;

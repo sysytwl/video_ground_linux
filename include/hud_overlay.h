@@ -26,11 +26,6 @@ enum hud_overlay_menu{
     interface,
     mac,
     start,
-    speed,
-    alt,
-    heading,
-    attitude,
-    predicted,
     menu_items_count
 };
 
@@ -75,7 +70,6 @@ private:
     int osd_scale_ = 2;            // scaling factor for rendering
     Uint32 last_blink_time_ = 0;
     bool blink_on_ = true;
-    bool last_is_text_mode_ = false;
     bool render_mode_logged_ = false;
 
     SDL_Color getColorForAttr(uint8_t attr);

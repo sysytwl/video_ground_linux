@@ -2,6 +2,7 @@
 #include "wifi_inj_sin.h"
 #include "radiotap.h"
 #include "fec.h"
+#include "app_log.h"
 
 #include <iostream>
 #include <cstring>
@@ -13,31 +14,28 @@
 uint8_t data_rate;
 int8_t dbm_antsignal;
 
-// Global or static variable
-static FILE *log_file = NULL;
-
 // Initialize once
 void init_logger() {
-    log_file = fopen("log.txt", "a");
+    app_log("PACKET_POOL", "logger initialized");
 }
 
 // Log function
 void log_message(const char* format, ...) {
-    if (!log_file) return;
-    
+    char message[512];
     va_list args;
     va_start(args, format);
-    vfprintf(log_file, format, args);
-    fflush(log_file);  // Ensure immediate write
+    vsnprintf(message, sizeof(message), format, args);
     va_end(args);
+    size_t len = strlen(message);
+    while (len > 0 && (message[len - 1] == '\n' || message[len - 1] == '\r')) {
+        message[--len] = '\0';
+    }
+    app_log("PACKET_POOL", "%s", message);
 }
 
 // Cleanup
 void close_logger() {
-    if (log_file) {
-        fclose(log_file);
-        log_file = NULL;
-    }
+    app_log("PACKET_POOL", "logger closed");
 }
 
 // int verify_fcs(const uint8_t *frame, size_t total_len) {

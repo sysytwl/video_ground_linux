@@ -129,6 +129,11 @@ typedef struct {
     uint16_t gps_ground_course; // 度 *10
     // 其他
     uint16_t flight_mode;
+    uint16_t cycle_time;
+    uint16_t i2c_errors;
+    uint16_t sensor_status;
+    uint32_t mode_flags;
+    uint8_t profile;
 } osd_data_t;
 
 // 回调函数类型，当解析到一个完整的OSD相关MSP包时被调用

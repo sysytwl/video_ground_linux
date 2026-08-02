@@ -5,7 +5,12 @@
 #include <cstring>
 
 enum TextOsdElement {
-    TEXT_OSD_MAIN_BATT_VOLTAGE,
+    TEXT_OSD_BATTERY,
+    TEXT_OSD_ARM_STATE,
+    TEXT_OSD_FLYMODE,
+    TEXT_OSD_WARNINGS,
+    TEXT_OSD_HORIZON,
+    TEXT_OSD_CROSSHAIRS,
     TEXT_OSD_CURRENT_DRAW,
     TEXT_OSD_MAH_DRAWN,
     TEXT_OSD_RSSI_VALUE,
@@ -16,7 +21,6 @@ enum TextOsdElement {
     TEXT_OSD_NUMERICAL_VARIO,
     TEXT_OSD_ROLL_ANGLE,
     TEXT_OSD_PITCH_ANGLE,
-    TEXT_OSD_FLYMODE,
     TEXT_OSD_TIMER,
     TEXT_OSD_ITEM_COUNT
 };
@@ -30,25 +34,30 @@ struct TextOsdElementConfig {
 static std::atomic<bool> g_fc_text_osd_seen{false};
 
 static TextOsdElementConfig g_element_config[TEXT_OSD_ITEM_COUNT] = {
-    [TEXT_OSD_MAIN_BATT_VOLTAGE]  = {2, 1, true},
-    [TEXT_OSD_CURRENT_DRAW]       = {2, 10, true},
+    [TEXT_OSD_BATTERY]            = {1, 1, true},
+    [TEXT_OSD_ARM_STATE]          = {0, 22, true},
+    [TEXT_OSD_FLYMODE]            = {1, 20, true},
+    [TEXT_OSD_WARNINGS]           = {13, 9, true},
+    [TEXT_OSD_HORIZON]            = {7, 10, true},
+    [TEXT_OSD_CROSSHAIRS]         = {7, 14, true},
+    [TEXT_OSD_CURRENT_DRAW]       = {2, 1, true},
     [TEXT_OSD_MAH_DRAWN]          = {3, 1, true},
-    [TEXT_OSD_RSSI_VALUE]         = {3, 10, true},
+    [TEXT_OSD_RSSI_VALUE]         = {3, 11, true},
     [TEXT_OSD_ALTITUDE]           = {5, 1, true},
     [TEXT_OSD_GPS_SPEED]          = {6, 1, true},
     [TEXT_OSD_GPS_SATS]           = {7, 1, true},
-    [TEXT_OSD_NUMERICAL_HEADING]  = {6, 12, true},
-    [TEXT_OSD_NUMERICAL_VARIO]    = {5, 12, true},
+    [TEXT_OSD_NUMERICAL_HEADING]  = {6, 20, true},
+    [TEXT_OSD_NUMERICAL_VARIO]    = {5, 20, true},
     [TEXT_OSD_ROLL_ANGLE]         = {14, 1, true},
-    [TEXT_OSD_PITCH_ANGLE]        = {14, 12, true},
-    [TEXT_OSD_FLYMODE]            = {0, 22, true},
+    [TEXT_OSD_PITCH_ANGLE]        = {14, 13, true},
     [TEXT_OSD_TIMER]              = {0, 1, true},
 };
 
 static const TextOsdElement g_display_order[] = {
     TEXT_OSD_TIMER,
+    TEXT_OSD_ARM_STATE,
+    TEXT_OSD_BATTERY,
     TEXT_OSD_FLYMODE,
-    TEXT_OSD_MAIN_BATT_VOLTAGE,
     TEXT_OSD_CURRENT_DRAW,
     TEXT_OSD_MAH_DRAWN,
     TEXT_OSD_RSSI_VALUE,
@@ -59,6 +68,9 @@ static const TextOsdElement g_display_order[] = {
     TEXT_OSD_GPS_SATS,
     TEXT_OSD_ROLL_ANGLE,
     TEXT_OSD_PITCH_ANGLE,
+    TEXT_OSD_HORIZON,
+    TEXT_OSD_CROSSHAIRS,
+    TEXT_OSD_WARNINGS,
 };
 
 static void write_element(TextOsdElement element, const char* text) {
@@ -75,10 +87,55 @@ static void format_element(TextOsdElement element, const osd_data_t& osd, char* 
     const float heading = static_cast<float>(osd.yaw) / 100.0f;
     const float roll = static_cast<float>(osd.roll) / 100.0f;
     const float pitch = static_cast<float>(osd.pitch) / 100.0f;
+    const bool armed = (osd.mode_flags & 0x01u) != 0;
+    const bool angle_mode = (osd.mode_flags & 0x02u) != 0;
+    const bool horizon_mode = (osd.mode_flags & 0x04u) != 0;
 
     switch (element) {
-    case TEXT_OSD_MAIN_BATT_VOLTAGE:
-        std::snprintf(out, out_size, "%.1fV", voltage);
+    case TEXT_OSD_BATTERY:
+        std::snprintf(out, out_size, "[BAT] %.1fV", voltage);
+        break;
+    case TEXT_OSD_ARM_STATE:
+        std::snprintf(out, out_size, "%s", armed ? "ARMED" : "LOCKED");
+        break;
+    case TEXT_OSD_FLYMODE:
+        if (angle_mode) {
+            std::snprintf(out, out_size, "ANGL");
+        } else if (horizon_mode) {
+            std::snprintf(out, out_size, "HORZ");
+        } else {
+            std::snprintf(out, out_size, "ACRO");
+        }
+        break;
+    case TEXT_OSD_WARNINGS:
+        if (voltage > 0.0f && voltage < 10.5f) {
+            std::snprintf(out, out_size, "LOW BATTERY");
+        } else if (osd.i2c_errors > 0) {
+            std::snprintf(out, out_size, "I2C ERR %u", osd.i2c_errors);
+        } else if (!armed) {
+            std::snprintf(out, out_size, "LOCKED");
+        } else {
+            out[0] = '\0';
+        }
+        break;
+    case TEXT_OSD_HORIZON: {
+        int offset = static_cast<int>(roll / 12.0f);
+        if (offset < -3) offset = -3;
+        if (offset > 3) offset = 3;
+        const char* lines[] = {
+            "---       ",
+            " ---      ",
+            "  ---     ",
+            "   ---    ",
+            "    ---   ",
+            "     ---  ",
+            "      --- "
+        };
+        std::snprintf(out, out_size, "%s", lines[offset + 3]);
+        break;
+    }
+    case TEXT_OSD_CROSSHAIRS:
+        std::snprintf(out, out_size, "+");
         break;
     case TEXT_OSD_CURRENT_DRAW:
         std::snprintf(out, out_size, "%.1fA", current);
@@ -109,9 +166,6 @@ static void format_element(TextOsdElement element, const osd_data_t& osd, char* 
         break;
     case TEXT_OSD_PITCH_ANGLE:
         std::snprintf(out, out_size, "PIT %.1f", pitch);
-        break;
-    case TEXT_OSD_FLYMODE:
-        std::snprintf(out, out_size, "%s", osd.flight_mode ? "ARM" : "DISARM");
         break;
     case TEXT_OSD_TIMER:
         std::snprintf(out, out_size, "TIME --:--");

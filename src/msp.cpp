@@ -128,6 +128,22 @@ static void handle_v1_packet(msp_parser_t *parser, uint8_t checksum, msp_osd_cal
             publish_msp_osd_state();
         }
         break;
+    case MSP_STATUS:
+        if (parser->expected_len >= 10) {
+            std::lock_guard<std::mutex> lock(g_osd_mutex);
+            g_osd.cycle_time = (uint16_t)(parser->in_buf[0] | (parser->in_buf[1] << 8));
+            g_osd.i2c_errors = (uint16_t)(parser->in_buf[2] | (parser->in_buf[3] << 8));
+            g_osd.sensor_status = (uint16_t)(parser->in_buf[4] | (parser->in_buf[5] << 8));
+            g_osd.mode_flags = (uint32_t)(parser->in_buf[6] | (parser->in_buf[7] << 8) |
+                                          (parser->in_buf[8] << 16) | (parser->in_buf[9] << 24));
+            if (parser->expected_len >= 11) {
+                g_osd.profile = parser->in_buf[10];
+            }
+            g_osd.flight_mode = static_cast<uint16_t>(g_osd.mode_flags & 0xffff);
+            msp_debug_log("status cycle=%u i2c=%u sensors=0x%04X modes=0x%08X profile=%u", g_osd.cycle_time, g_osd.i2c_errors, g_osd.sensor_status, g_osd.mode_flags, g_osd.profile);
+            publish_msp_osd_state();
+        }
+        break;
     case MSP_SET_OSD_CANVAS:
         // 格式：[rows] [cols]
         if (parser->expected_len >= 2) {
