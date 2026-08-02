@@ -38,7 +38,6 @@ public:
 
     void init(SDL_Renderer* renderer, TTF_Font* font);
 
-    void invalidateOSDTexture();
     DisplayMode getDisplayMode() const;
 
     // Draw decoded OSD onto the current render target.
@@ -62,7 +61,6 @@ private:
     TTF_Font* font_;
 
     SDL_Texture* osd_font_atlas_ = nullptr;
-    bool osd_texture_dirty_ = true;
     SDL_Surface* osd_font_atlas_surf_ = nullptr; // keep surface for software blitting
 
     int osd_tile_w_ = 12;          // original tile width

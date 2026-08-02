@@ -32,6 +32,27 @@ MenuItem menu_items_[] = {
     },
 };
 
+static Uint32 getSurfacePixel(SDL_Surface* surface, int x, int y) {
+    const int bpp = surface->format->BytesPerPixel;
+    const Uint8* pixel = static_cast<const Uint8*>(surface->pixels) + y * surface->pitch + x * bpp;
+
+    switch (bpp) {
+    case 1:
+        return *pixel;
+    case 2:
+        return *reinterpret_cast<const Uint16*>(pixel);
+    case 3:
+        if (SDL_BYTEORDER == SDL_BIG_ENDIAN) {
+            return pixel[0] << 16 | pixel[1] << 8 | pixel[2];
+        }
+        return pixel[0] | pixel[1] << 8 | pixel[2] << 16;
+    case 4:
+        return *reinterpret_cast<const Uint32*>(pixel);
+    default:
+        return 0;
+    }
+}
+
 HUDOverlay::HUDOverlay() {
     //populate_menu();
 }
@@ -46,25 +67,23 @@ void HUDOverlay::init(SDL_Renderer* renderer, TTF_Font* font){
     font_ = font;
 
     // Load the Betaflight OSD font atlas
-    SDL_Surface* surface = IMG_Load("betaflight.png");
+    SDL_Surface* surface = IMG_Load("vision.png");
     if (surface) {
+        const Uint32 background_key = getSurfacePixel(surface, 0, 0);
+        SDL_SetColorKey(surface, SDL_TRUE, background_key);
         // keep the surface for software glyph blitting in worker thread
         osd_font_atlas_surf_ = surface;
         osd_font_atlas_ = SDL_CreateTextureFromSurface(renderer_, surface);
         if (!osd_font_atlas_) {
-            SDL_Log("Failed to create texture from betaflight.png: %s", SDL_GetError());
+            SDL_Log("Failed to create texture from vision.png: %s", SDL_GetError());
         } else {
+            SDL_SetTextureBlendMode(osd_font_atlas_, SDL_BLENDMODE_BLEND);
             SDL_Log("OSD font atlas loaded successfully.");
         }
     } else {
-        SDL_Log("Failed to load betaflight.png: %s", IMG_GetError());
+        SDL_Log("Failed to load vision.png: %s", IMG_GetError());
     }
     last_blink_time_ = SDL_GetTicks();
-    osd_texture_dirty_ = true;
-}
-
-void HUDOverlay::invalidateOSDTexture() {
-    osd_texture_dirty_ = true;
 }
 
 DisplayMode HUDOverlay::getDisplayMode() const {
@@ -114,8 +133,6 @@ void HUDOverlay::drawOSDContent(int screen_w, int screen_h) {
             SDL_RenderCopy(renderer_, osd_font_atlas_, &src, &dst);
         }
     }
-
-    osd_texture_dirty_ = false;
 }
 
 void HUDOverlay::renderOSD(int screen_w, int screen_h) {
@@ -217,7 +234,6 @@ void HUDOverlay::navigate_left() {
     auto& item = menu_items_[selected_item_];
     if (item.editable && item.selected > 0) {
         item.selected--;
-        invalidateOSDTexture();
     }
 }
 
@@ -226,7 +242,6 @@ void HUDOverlay::navigate_right() {
     auto& item = menu_items_[selected_item_];
     if (item.editable && item.selected < item.options.size() - 1) {
         item.selected++;
-        invalidateOSDTexture();
     }
 }
 
