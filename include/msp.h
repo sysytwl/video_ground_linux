@@ -50,7 +50,9 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         rows_ = (rows > 0 && rows <= MAX_OSD_ROWS) ? rows : MAX_OSD_ROWS;
         cols_ = (cols > 0 && cols <= MAX_OSD_COLS) ? cols : MAX_OSD_COLS;
-        clear();
+        for (int r = 0; r < MAX_OSD_ROWS; ++r)
+            for (int c = 0; c < MAX_OSD_COLS; ++c)
+                buffer_[r][c] = {' ', 0};
     }
 
     void clear() {
