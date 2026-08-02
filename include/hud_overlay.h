@@ -67,7 +67,6 @@ private:
 
     int osd_tile_w_ = 12;          // original tile width
     int osd_tile_h_ = 18;          // original tile height
-    int osd_scale_ = 2;            // scaling factor for rendering
     Uint32 last_blink_time_ = 0;
     bool blink_on_ = true;
     bool render_mode_logged_ = false;

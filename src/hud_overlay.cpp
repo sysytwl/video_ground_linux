@@ -89,14 +89,9 @@ void HUDOverlay::drawOSDContent(int screen_w, int screen_h) {
     }
 
     SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_BLEND);
-    int dst_w = osd_tile_w_ * osd_scale_;
-    int dst_h = osd_tile_h_ * osd_scale_;
     int rows = g_osd_screen.rows();
     int cols = g_osd_screen.cols();
-    int content_w = cols * dst_w;
-    int content_h = rows * dst_h;
-    int start_x = std::max(0, (screen_w - content_w) / 2);
-    int start_y = std::max(0, (screen_h - content_h) / 2);
+    if (rows <= 0 || cols <= 0 || screen_w <= 0 || screen_h <= 0) return;
 
     for (int r = 0; r < rows; ++r) {
         for (int c = 0; c < cols; ++c) {
@@ -108,7 +103,11 @@ void HUDOverlay::drawOSDContent(int screen_w, int screen_h) {
             int tile_row = tile_index / 16;
             int tile_col = tile_index % 16;
             SDL_Rect src = { tile_col * (osd_tile_w_ + 1), tile_row * (osd_tile_h_ + 1), osd_tile_w_, osd_tile_h_ };
-            SDL_Rect dst = { start_x + c * dst_w, start_y + r * dst_h, dst_w, dst_h };
+            const int x0 = (c * screen_w) / cols;
+            const int x1 = ((c + 1) * screen_w) / cols;
+            const int y0 = (r * screen_h) / rows;
+            const int y1 = ((r + 1) * screen_h) / rows;
+            SDL_Rect dst = { x0, y0, std::max(1, x1 - x0), std::max(1, y1 - y0) };
             SDL_Color color = getColorForAttr(ch.attribute);
             SDL_SetTextureColorMod(osd_font_atlas_, color.r, color.g, color.b);
             SDL_SetTextureAlphaMod(osd_font_atlas_, color.a);
