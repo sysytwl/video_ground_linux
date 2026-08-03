@@ -21,7 +21,7 @@ std::atomic<bool> g_running(true);
 
 void signal_handler(int sig) {
     g_running = false;
-    sniffer.stop_capture();
+    sniffer.stop_multi_capture();
 }
 
 int main(int argc, char* argv[]) {
@@ -43,29 +43,30 @@ int main(int argc, char* argv[]) {
             std::cerr << "Warning: msp_start() failed to start serial reader" << std::endl;
         }
 
-    std::vector<std::string> macs = {"94:b5:55:26:e2:ff", "58:bf:25:1b:07:cb"};
-    hud.set_discovered_macs(macs);
+    hud.set_discovered_devices({});
 
-    std::thread img_decode_thread(decoder_thread);
-    std::thread capture_thread;
+    std::thread img_decode_thread(decoder_thread); //main display thread
     bool capture_active = false;
 
     while (g_running) {
+        if (!capture_active && hud.consume_scan_request()) {
+            auto scan_interfaces = hud.get_selected_interfaces();
+            auto discovered_devices = sniffer.scan_devices(scan_interfaces);
+            hud.set_discovered_devices(discovered_devices);
+        }
+
         if (hud.should_start_capture() && !capture_active) {
-            std::string iface = hud.get_selected_interface();
-            std::string mac_filter = hud.get_selected_mac();
-            uint8_t filter_case = mac_filter.empty() ? 2 : 1;
-            if (sniffer.initialize(iface, filter_case, mac_filter)) {
+            auto interfaces = hud.get_selected_interfaces();
+            DiscoveredDevice device = hud.get_selected_device();
+            uint8_t filter_case = device.mac.empty() ? 2 : 1;
+            if (!interfaces.empty() && !device.mac.empty() && sniffer.initialize_multi(interfaces, filter_case, device.mac, device.channel)) {
                 capture_active = true;
-                capture_thread = std::thread([]() {
-                    sniffer.start_capture(0);
-                });
+                sniffer.start_multi_capture(0);
             } else {
-                std::cerr << "Failed to initialize capture interface: " << iface << std::endl;
+                std::cerr << "Select a scanned device before starting capture" << std::endl;
             }
         } else if (!hud.should_start_capture() && capture_active) {
-            sniffer.stop_capture();
-            if (capture_thread.joinable()) capture_thread.join();
+            sniffer.stop_multi_capture();
             capture_active = false;
         }
 
@@ -75,8 +76,7 @@ int main(int argc, char* argv[]) {
 
     // Cleanup
     if (capture_active) {
-        sniffer.stop_capture();
-        if (capture_thread.joinable()) capture_thread.join();
+        sniffer.stop_multi_capture();
     }
     msp_stop();
     video_stop();

@@ -13,14 +13,26 @@ MenuItem menu_items_[] = {
         .editable = true,
     },
     [interface] = {
-        .name = "Interface",
+        .name = "Interface 1",
         .options = {"wlan0mon"},
         .selected = 0,
         .editable = true,
     },
+    [interface2] = {
+        .name = "Interface 2",
+        .options = {"None"},
+        .selected = 0,
+        .editable = true,
+    },
     [mac] = {
-        .name = "MAC Filter",
-        .options = {"All"},
+        .name = "Devices",
+        .options = {"None"},
+        .selected = 0,
+        .editable = true,
+    },
+    [scan] = {
+        .name = "Scan",
+        .options = {"Idle", "Scan MACs"},
         .selected = 0,
         .editable = true,
     },
@@ -207,15 +219,24 @@ void HUDOverlay::draw(int width, int height) {
 void HUDOverlay::set_available_interfaces(const std::vector<std::string>& interfaces) {
     std::lock_guard<std::mutex> lock(menu_mutex_);
     available_interfaces_ = interfaces;
-    menu_items_[interface].options = interfaces;
+    menu_items_[interface].options = interfaces.empty() ? std::vector<std::string>{"None"} : interfaces;
     menu_items_[interface].selected = 0;
+
+    menu_items_[interface2].options.clear();
+    menu_items_[interface2].options.push_back("None");
+    menu_items_[interface2].options.insert(menu_items_[interface2].options.end(), interfaces.begin(), interfaces.end());
+    menu_items_[interface2].selected = 0;
 
 }
 
-void HUDOverlay::set_discovered_macs(const std::vector<std::string>& macs) {
+void HUDOverlay::set_discovered_devices(const std::vector<DiscoveredDevice>& devices) {
     std::lock_guard<std::mutex> lock(menu_mutex_);
-    discovered_macs_ = macs;
-    menu_items_[mac].options = macs;
+    discovered_devices_ = devices;
+    menu_items_[mac].options.clear();
+    menu_items_[mac].options.push_back("None");
+    for (const auto& device : devices) {
+        menu_items_[mac].options.push_back(device.mac + " CH" + std::to_string(device.channel));
+    }
     menu_items_[mac].selected = 0;
 }
 
@@ -257,17 +278,46 @@ std::string HUDOverlay::get_selected_interface() const {
     return "wlan0mon";
 }
 
-std::string HUDOverlay::get_selected_mac() const {
+std::vector<std::string> HUDOverlay::get_selected_interfaces() const {
     std::lock_guard<std::mutex> lock(menu_mutex_);
-    if (menu_items_[mac].options.size() > menu_items_[mac].selected) {
-        if (menu_items_[mac].selected == 0) return "";
-        return menu_items_[mac].options[menu_items_[mac].selected];
+    std::vector<std::string> selected;
+
+    auto add_interface = [&selected](const MenuItem& item) {
+        if (item.options.size() <= item.selected) return;
+        const std::string& value = item.options[item.selected];
+        if (value.empty() || value == "None") return;
+        if (std::find(selected.begin(), selected.end(), value) == selected.end()) {
+            selected.push_back(value);
+        }
+    };
+
+    add_interface(menu_items_[interface]);
+    add_interface(menu_items_[interface2]);
+    return selected;
+}
+
+DiscoveredDevice HUDOverlay::get_selected_device() const {
+    std::lock_guard<std::mutex> lock(menu_mutex_);
+    if (menu_items_[mac].selected == 0) return {};
+
+    const size_t device_index = menu_items_[mac].selected - 1;
+    if (discovered_devices_.size() > device_index) {
+        return discovered_devices_[device_index];
     }
-    return "";
+    return {};
 }
 
 bool HUDOverlay::should_start_capture() const {
     std::lock_guard<std::mutex> lock(menu_mutex_);
         return menu_items_[start].options[menu_items_[start].selected] == "Stop Capture";
     return false;
+}
+
+bool HUDOverlay::consume_scan_request() {
+    std::lock_guard<std::mutex> lock(menu_mutex_);
+    if (menu_items_[scan].options.size() <= menu_items_[scan].selected) return false;
+    if (menu_items_[scan].options[menu_items_[scan].selected] != "Scan MACs") return false;
+
+    menu_items_[scan].selected = 0;
+    return true;
 }

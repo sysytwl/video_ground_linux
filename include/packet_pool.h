@@ -10,6 +10,7 @@
 #include <functional>
 #include <memory>
 #include <unordered_map>
+#include <unordered_set>
 #include "wifi_packet.h"
 
 #define FEC_K 4
@@ -105,6 +106,7 @@ private:
     std::atomic<uint64_t> total_packets_;
     std::atomic<uint64_t> packets_recovered_;
     std::atomic<uint64_t> packets_received_;
+    std::atomic<uint64_t> duplicate_packets_;
     std::atomic<uint64_t> packets_wasted_;
     std::atomic<uint64_t> frames_decoded_;
     std::atomic<uint64_t> frames_discarded_;
@@ -113,6 +115,7 @@ private:
 
     PacketCallback callback_;
     void* callback_user_data_;
+    std::unordered_set<uint64_t> seen_parts_;
     
     // Timeout for stale frames (milliseconds)
     std::chrono::milliseconds frame_timeout_{1000};

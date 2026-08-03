@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 #include <mutex>
+#include "packet_sniffer.h"
 
 enum DisplayMode {
     DISPLAY_NORMAL = 0,
@@ -24,7 +25,9 @@ struct MenuItem {
 enum hud_overlay_menu{
     display_mode = 0,
     interface,
+    interface2,
     mac,
+    scan,
     start,
     menu_items_count
 };
@@ -44,7 +47,7 @@ public:
     void renderOSD(int width, int height);
     void draw(int width, int height);
     void set_available_interfaces(const std::vector<std::string>& interfaces);
-    void set_discovered_macs(const std::vector<std::string>& macs);
+    void set_discovered_devices(const std::vector<DiscoveredDevice>& devices);
 
     void navigate_up();
     void navigate_down();
@@ -53,8 +56,10 @@ public:
     void toggle_menu();
 
     std::string get_selected_interface() const;
-    std::string get_selected_mac() const;
+    std::vector<std::string> get_selected_interfaces() const;
+    DiscoveredDevice get_selected_device() const;
     bool should_start_capture() const;
+    bool consume_scan_request();
 
 private:
     SDL_Renderer* renderer_;
@@ -78,7 +83,7 @@ private:
     mutable std::mutex menu_mutex_;
 
     std::vector<std::string> available_interfaces_;
-    std::vector<std::string> discovered_macs_;
+    std::vector<DiscoveredDevice> discovered_devices_;
 
 };
 

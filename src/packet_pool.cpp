@@ -64,6 +64,7 @@ PacketPool::PacketPool()
       total_packets_(0),
       packets_recovered_(0),
       packets_received_(0),
+    duplicate_packets_(0),
       packets_wasted_(0),
       frames_decoded_(0),
       frames_discarded_(0),
@@ -150,6 +151,7 @@ void PacketPool::process_active_frame() {
         
         frames_decoded_++;
         total_packets_ += FEC_K;
+        seen_parts_.clear();
         
         // Clean up
         delete[] block_indices;
@@ -185,6 +187,7 @@ void PacketPool::flush_stale_frame() {
 
     packets_wasted_ += available_packets;
     frames_discarded_++;
+    seen_parts_.clear();
 }
 
 void PacketPool::decoder_thread_func(int id) {
@@ -263,7 +266,8 @@ void PacketPool::decoder_thread_func(int id) {
         Air2Ground_Header* header = (Air2Ground_Header*)((uint8_t*)IEEE_HEADER + WLAN_IEEE80211_HEADER_SIZE);
         if(header->packet_version != PACKET_VERSION) {
             std::cout << "Wrong pack Version" << std::endl;
-            return;
+            packets_wasted_++;
+            continue;
         }
 
         if (header->type == Air2Ground_Header::Type::Video) {
@@ -277,8 +281,13 @@ void PacketPool::decoder_thread_func(int id) {
                 - Air2Ground_Header_Size 
                 - (FCS ? 4 : 0);
 
+            if (active_frame_.frame_index != 0 && frame_index < active_frame_.frame_index) {
+                packets_wasted_++;
+                continue;
+            }
+
             // Check if this is for the current active frame
-            if (active_frame_.frame_index == 0 || active_frame_.frame_index != frame_index) {
+            if (active_frame_.frame_index == 0 || active_frame_.frame_index < frame_index) {
 
                 //process last frame
                 if (active_frame_.frame_index != 0) {
@@ -287,6 +296,7 @@ void PacketPool::decoder_thread_func(int id) {
 
                 active_frame_.reset(frame_index);
                 active_frame_.data_size = data_size;
+                seen_parts_.clear();
             }
 
             // Validate packet
@@ -300,6 +310,12 @@ void PacketPool::decoder_thread_func(int id) {
                 packets_wasted_++;
                 printf("Size mismatch for frame %u: expected %zu, got %zu\n",
                     frame_index, active_frame_.data_size, data_size);
+                continue;
+            }
+
+            uint64_t part_key = (static_cast<uint64_t>(frame_index) << 8) | part_index;
+            if (!seen_parts_.insert(part_key).second) {
+                duplicate_packets_++;
                 continue;
             }
 
@@ -373,6 +389,7 @@ void PacketPool::stop_processing() {
         }
 
         active_frame_.deinit();
+        seen_parts_.clear();
     }
 
     close_logger();
@@ -383,6 +400,7 @@ void PacketPool::stop_processing() {
     printf("Total frames decoded: %llu\n", (unsigned long long)frames_decoded_.load());
     printf("Total frames discarded: %llu\n", (unsigned long long)frames_discarded_.load());
     printf("Packets received: %llu\n", (unsigned long long)packets_received_.load());
+    printf("Duplicate packets skipped: %llu\n", (unsigned long long)duplicate_packets_.load());
     printf("Packets recovered: %llu\n", (unsigned long long)packets_recovered_.load());
     printf("Packets wasted: %llu\n", (unsigned long long)packets_wasted_.load());
     printf("Processing time: %.2f seconds\n", elapsed_time);

@@ -5,33 +5,117 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <algorithm>
+#include <chrono>
 #include <iomanip>
+#include <map>
+#include <set>
+#include <thread>
 
+#include "app_log.h"
+#include "wifi_inj_sin.h"
+
+namespace {
+struct ChannelScanStats {
+    int packets = 0;
+    int data_frames = 0;
+    int version_matches = 0;
+    int version_mismatches = 0;
+    int missing_radiotap_channel = 0;
+    std::set<std::string> data_macs;
+    std::set<std::string> matched_macs;
+};
+
+struct ScanContext {
+    std::set<std::string> macs;
+    std::map<std::string, int> device_channels;
+    int channel = 0;
+    ChannelScanStats* stats = nullptr;
+};
+
+struct ScanHandle {
+    std::string interface;
+    pcap_t* handle = nullptr;
+};
+
+std::vector<int> scan_channel_order() {
+    std::vector<int> channels;
+    for (int channel = 1; channel <= 14; channel++) {
+        channels.push_back(channel);
+    }
+    return channels;
+}
+
+uint16_t read_le16(const uint8_t* data) {
+    return static_cast<uint16_t>(data[0]) | (static_cast<uint16_t>(data[1]) << 8);
+}
+
+int frequency_to_channel(uint16_t frequency) {
+    if (frequency == 2484) return 14;
+    if (frequency >= 2412 && frequency <= 2472 && (frequency - 2407) % 5 == 0) {
+        return (frequency - 2407) / 5;
+    }
+    return 0;
+}
+
+void scan_packet_callback(u_char* user_data, const struct pcap_pkthdr* pkthdr, const u_char* packet) {
+    auto* context = reinterpret_cast<ScanContext*>(user_data);
+    if (!context || !packet || pkthdr->caplen < sizeof(ieee80211_radiotap_header)) return;
+    if (context->stats) context->stats->packets++;
+
+    ieee80211_radiotap_iterator radiotap_header;
+    if (ieee80211_radiotap_iterator_init(&radiotap_header,
+        (ieee80211_radiotap_header*)packet,
+        pkthdr->caplen) != 0) {
+        return;
+    }
+
+    int radiotap_channel = 0;
+    while (ieee80211_radiotap_iterator_next(&radiotap_header) == 0) {
+        if (radiotap_header.this_arg_index == IEEE80211_RADIOTAP_CHANNEL) {
+            radiotap_channel = frequency_to_channel(read_le16(radiotap_header.this_arg));
+            break;
+        }
+    }
+
+    const size_t wifi_offset = radiotap_header.max_length;
+    if (pkthdr->caplen < wifi_offset + WLAN_IEEE80211_HEADER_SIZE + Air2Ground_Header_Size) return;
+
+    auto* ieee_header = (IEEE80211_MacHeader*)(packet + wifi_offset);
+    if (ieee_header->fc.type != 0b10) return;
+    const std::string src_mac = WiFiPacket::mac_to_string(ieee_header->addr2);
+    if (context->stats) {
+        context->stats->data_frames++;
+        context->stats->data_macs.insert(src_mac);
+    }
+
+    auto* header = (Air2Ground_Header*)(packet + wifi_offset + WLAN_IEEE80211_HEADER_SIZE);
+    if (header->packet_version != PACKET_VERSION) {
+        if (context->stats) context->stats->version_mismatches++;
+        return;
+    }
+
+    if (radiotap_channel <= 0 || radiotap_channel > 13) {
+        if (context->stats) context->stats->missing_radiotap_channel++;
+        app_log("SCAN", "matched_mac=%s ignored invalid_radiotap_channel=%d loop_channel=%d", src_mac.c_str(), radiotap_channel, context->channel);
+        return;
+    }
+
+    if (context->stats) {
+        context->stats->version_matches++;
+        context->stats->matched_macs.insert(src_mac);
+    }
+    context->macs.insert(src_mac);
+    context->device_channels[src_mac] = radiotap_channel;
+}
+}
 
 
 PacketSniffer::PacketSniffer()
-    : handle_(nullptr), filter_by_mac_(false), link_type_(0), running_(false) {
+    : filter_by_mac_(false), running_(false), last_scan_match_channel_(DEFAULT_WIFI_CHANNEL) {
 }
 
 PacketSniffer::~PacketSniffer() {
-    stop_capture();
-    if (handle_) {
-        pcap_close(handle_);
-    }
-}
-
-bool PacketSniffer::initialize(std::string interface,uint8_t cases,std::string filter_exp) {
-    // Initialize pcap
-    if (!initialize_pcap(interface)) {
-        return false;
-    }
-
-    //Set up filter
-    if (!setup_filter(cases,filter_exp)) {
-       return false;
-    }
-
-    return true;
+    stop_multi_capture();
 }
 
 #include <stdio.h>
@@ -50,7 +134,11 @@ int set_wifi_channel(const char *interface, int channel) {
 // }
 
     // 方法1: 使用 iw 命令（推荐）
-    snprintf(command, sizeof(command), "sudo iw dev %s set channel %d", interface, channel);
+    if (geteuid() == 0) {
+        snprintf(command, sizeof(command), "iw dev %s set channel %d", interface, channel);
+    } else {
+        snprintf(command, sizeof(command), "sudo iw dev %s set channel %d", interface, channel);
+    }
 
     // 方法2: 使用 iwconfig 命令（较旧）
     // snprintf(command, sizeof(command), "sudo iwconfig %s channel %d", interface, channel);
@@ -58,26 +146,26 @@ int set_wifi_channel(const char *interface, int channel) {
     // 执行系统命令
     int result = system(command);
     if (result == 0) {
-        printf("成功将接口 %s 切换到信道 %d\n", interface, channel);
+        app_log("set_wifi_channel", "成功将接口 %s 切换到信道 %d\n", interface, channel);
         return 0;
     } else {
-        fprintf(stderr, "切换信道失败！请检查接口名称和权限。\n");
+        app_log("set_wifi_channel", "切换信道失败！请检查接口名称和权限。\n");
         return -1;
     }
 }
 
-bool PacketSniffer::initialize_pcap(std::string interface) {
+pcap_t* initialize_pcap(std::string interface) {
     char errbuf[PCAP_ERRBUF_SIZE];
 
     // Method 1: Modern API with immediate mode
-    handle_ = pcap_create(interface.c_str(), errbuf);
+    pcap_t* handle_ = pcap_create(interface.c_str(), errbuf);
     if (handle_) {
         // Check if interface supports injection
         if (pcap_can_set_rfmon(handle_) <= 0) {
             std::cerr << "Interface does not support monitor mode/injection" << std::endl;
             pcap_close(handle_);
             handle_ = nullptr;
-            return false;
+            return handle_;
         }
 
         // if (pcap_set_rfmon(handle_, 1) != 0) {
@@ -110,148 +198,52 @@ bool PacketSniffer::initialize_pcap(std::string interface) {
 
     }
 
+    // if (handle_ == nullptr) {
+    //     std::cerr << "Could not open device " << interface << ": " << errbuf << std::endl;
+    //     std::cerr << "\nMake sure:" << std::endl;
+    //     std::cerr << "1. Interface " << interface << " exists" << std::endl;
+    //     std::cerr << "2. Interface is in monitor mode" << std::endl;
+    //     std::cerr << "3. You have root privileges" << std::endl;
 
-    if (handle_ == nullptr) {
-        std::cerr << "Could not open device " << interface << ": " << errbuf << std::endl;
-        std::cerr << "\nMake sure:" << std::endl;
-        std::cerr << "1. Interface " << interface << " exists" << std::endl;
-        std::cerr << "2. Interface is in monitor mode" << std::endl;
-        std::cerr << "3. You have root privileges" << std::endl;
-
-        // Try to list available devices
-        pcap_if_t *alldevs;
-        if (pcap_findalldevs(&alldevs, errbuf) == 0) {
-            std::cerr << "\nAvailable interfaces:" << std::endl;
-            for (pcap_if_t *d = alldevs; d != nullptr; d = d->next) {
-                std::cerr << "  " << d->name;
-                if (d->description) {
-                    std::cerr << " (" << d->description << ")";
-                }
-                std::cerr << std::endl;
-            }
-            pcap_freealldevs(alldevs);
-        }
-        return false;
-    }
+    //     // Try to list available devices
+    //     pcap_if_t *alldevs;
+    //     if (pcap_findalldevs(&alldevs, errbuf) == 0) {
+    //         std::cerr << "\nAvailable interfaces:" << std::endl;
+    //         for (pcap_if_t *d = alldevs; d != nullptr; d = d->next) {
+    //             std::cerr << "  " << d->name;
+    //             if (d->description) {
+    //                 std::cerr << " (" << d->description << ")";
+    //             }
+    //             std::cerr << std::endl;
+    //         }
+    //         pcap_freealldevs(alldevs);
+    //     }
+    //     return false;
+    // }
 
     // Get link layer type
-    link_type_ = pcap_datalink(handle_);
+    int link_type_ = pcap_datalink(handle_);
     std::cout << "Link type: " << link_type_ << " (";
     if (link_type_ == 127) {
         std::cout << "802.11 with Radiotap header)" << std::endl;
     } else if (link_type_ == 105) {
         std::cout << "802.11 without Radiotap)" << std::endl;
+        pcap_close(handle_);
+        handle_ = nullptr;
+        return handle_;
     } else {
         std::cout << "Unknown - may not be WiFi)" << std::endl;
         pcap_close(handle_);
         handle_ = nullptr;
-        return false;
+        return handle_;
     }
 
     std::cout << "Listening on WiFi interface: " << interface << std::endl;
 
-
-
-    return true;
+    return handle_;
 }
 
-bool PacketSniffer::initialize_multi(const std::vector<std::string>& interfaces,uint8_t cases, const std::string& filter_exp) {
-    interfaces_ = interfaces;
-
-    for (const auto& interface : interfaces) {
-        char errbuf[PCAP_ERRBUF_SIZE];
-        pcap_t* handle = pcap_create(interface.c_str(), errbuf);
-
-        if (handle) {
-            pcap_set_buffer_size(handle, 128 * 1024);
-            pcap_set_timeout(handle, 10);
-            pcap_set_promisc(handle, 1);
-            pcap_set_snaplen(handle, BUFSIZ);
-
-            if (pcap_activate(handle) != 0) {
-                pcap_close(handle);
-                handle = pcap_open_live(interface.c_str(), BUFSIZ, 1, 10, errbuf);
-            }
-
-            if (handle) {
-                // Setup filter for this interface
-                struct bpf_program fp;
-                std::string actual_filter = filter_exp;
-
-                if (cases == 1 && !filter_exp.empty()) {
-                    WiFiPacket::remove_char(actual_filter, ':');
-                    actual_filter = "wlan addr2 " + actual_filter;
-                }
-
-                if (pcap_compile(handle, &fp, actual_filter.c_str(), 0,
-                                 PCAP_NETMASK_UNKNOWN) == 0) {
-                    pcap_setfilter(handle, &fp);
-                    pcap_freecode(&fp);
-                }
-
-                multi_handles_.push_back(handle);
-                std::cout << "Initialized interface: " << interface << std::endl;
-            }
-        }
-    }
-
-    return !multi_handles_.empty();
-}
-
-#include "video_decoder.h"
-void PacketSniffer::start_multi_capture(int packet_count) {
-    // Start packet pool processing
-    packet_pool_.start_processing(1, video_callback);
-
-    std::cout << "\nStarting multi-interface capture on "
-              << multi_handles_.size() << " interfaces..." << std::endl;
-
-    running_ = true;
-
-    // Start a capture thread for each interface
-    for (auto handle : multi_handles_) {
-        capture_threads_.emplace_back(&PacketSniffer::single_capture_thread,
-                                       this, handle, packet_count);
-    }
-}
-
-void PacketSniffer::single_capture_thread(pcap_t* handle, int packet_count) {
-    int result = pcap_loop(handle, packet_count,
-                          PacketSniffer::pcap_callback,
-                          (u_char*)this);
-
-    if (result == -1) {
-        std::cerr << "Error in pcap_loop: " << pcap_geterr(handle) << std::endl;
-    }
-}
-
-void PacketSniffer::stop_multi_capture() {
-    running_ = false;
-
-    // Break all pcap loops
-    for (auto handle : multi_handles_) {
-        pcap_breakloop(handle);
-    }
-
-    // Wait for all threads
-    for (auto& thread : capture_threads_) {
-        if (thread.joinable()) {
-            thread.join();
-        }
-    }
-    capture_threads_.clear();
-
-    // Close all handles
-    for (auto handle : multi_handles_) {
-        pcap_close(handle);
-    }
-    multi_handles_.clear();
-
-    // Stop packet pool
-    packet_pool_.stop_processing();
-}
-
-bool PacketSniffer::setup_filter(uint8_t cases,std::string filter_exp) {
+bool setup_filter(pcap_t* handle_, uint8_t cases,std::string filter_exp) {
     struct bpf_program fp;
 
     if (cases==0) {
@@ -289,28 +281,56 @@ bool PacketSniffer::setup_filter(uint8_t cases,std::string filter_exp) {
     return true;
 }
 
-void PacketSniffer::packet_handler(const struct pcap_pkthdr* pkthdr, const u_char* packet) {
-    // Add to pool
-    packet_pool_.add_packet(packet, pkthdr->caplen);
+bool PacketSniffer::initialize_multi(const std::vector<std::string>& interfaces,uint8_t cases, const std::string& filter_exp, int channel) {
+    interfaces_ = interfaces;
+    const int capture_channel = channel > 0 ? channel : last_scan_match_channel_;
+
+    for (const auto& interface : interfaces) {
+        if (interface.empty() || interface == "None") continue;
+
+        app_log("initialize_multi", "capture interface=%s set_channel=%d", interface.c_str(), capture_channel);
+        set_wifi_channel(interface.c_str(), capture_channel);
+
+        pcap_t* handle = initialize_pcap(interface.c_str());
+            if (handle) {
+                // Setup filter for this interface
+                if (setup_filter(handle, cases, filter_exp))
+                    multi_handles_.push_back(handle);
+            }
+    }
+
+    return !multi_handles_.empty();
 }
 
-std::thread _injection_thread;
+#include "video_decoder.h"
+void PacketSniffer::start_multi_capture(int packet_count) {
+    // Start packet pool processing
+    packet_pool_.start_processing(1, video_callback);
 
-void PacketSniffer::start_capture(int packet_count) {
-    // Start packet pool processing thread
-    packet_pool_.start_processing(1,video_callback);
+    {
+        std::lock_guard<std::mutex> lock(seen_packet_mutex_);
+        seen_packet_keys_.clear();
+    }
 
-    std::cout << "Press Ctrl+C to stop\n" << std::endl;
+    std::cout << "\nStarting multi-interface capture on "
+              << multi_handles_.size() << " interfaces..." << std::endl;
 
     running_ = true;
 
-    // _injection_thread = std::thread(&PacketSniffer::injection_loop, this);
+    // Start a capture thread for each interface
+    for (auto handle : multi_handles_) {
+        capture_threads_.emplace_back(&PacketSniffer::single_capture_thread,
+                                       this, handle, packet_count);
+    }
+}
 
-    // Start capture loop (block thread)
-    int result = pcap_loop(handle_, packet_count,PacketSniffer::pcap_callback, (u_char*)this);
+void PacketSniffer::single_capture_thread(pcap_t* handle, int packet_count) {
+    int result = pcap_loop(handle, packet_count,
+                          PacketSniffer::pcap_callback,
+                          (u_char*)this);
 
     if (result == -1) {
-        std::cerr << "Error in pcap_loop: " << pcap_geterr(handle_) << std::endl;
+        std::cerr << "Error in pcap_loop: " << pcap_geterr(handle) << std::endl;
     } else if (result == -2) {
         std::cout << "Capture stopped by pcap_breakloop" << std::endl;
     } else if (result == 0 && packet_count > 0) {
@@ -318,16 +338,170 @@ void PacketSniffer::start_capture(int packet_count) {
     }
 }
 
-void PacketSniffer::stop_capture() {
+void PacketSniffer::stop_multi_capture() {
     running_ = false;
 
-    // if(_injection_thread.joinable())
-    //     _injection_thread.join();
-
-    if (handle_) {
-        pcap_breakloop(handle_);
+    // Break all pcap loops
+    for (auto handle : multi_handles_) {
+        pcap_breakloop(handle);
     }
+
+    // Wait for all threads
+    for (auto& thread : capture_threads_) {
+        if (thread.joinable()) {
+            thread.join();
+        }
+    }
+    capture_threads_.clear();
+
+    // Close all handles
+    for (auto handle : multi_handles_) {
+        pcap_close(handle);
+    }
+    multi_handles_.clear();
+
+    // Stop packet pool
     packet_pool_.stop_processing();
+
+    {
+        std::lock_guard<std::mutex> lock(seen_packet_mutex_);
+        seen_packet_keys_.clear();
+    }
+}
+
+std::vector<DiscoveredDevice> PacketSniffer::scan_devices(const std::vector<std::string>& interfaces) {
+    ScanContext context;
+    char errbuf[PCAP_ERRBUF_SIZE];
+    std::vector<ScanHandle> scan_handles;
+
+    for (const auto& interface : interfaces) {
+        if (interface.empty() || interface == "None") continue;
+
+        pcap_t* handle = pcap_create(interface.c_str(), errbuf);
+        if (!handle) {
+            std::cerr << "Could not create scan handle for " << interface << ": " << errbuf << std::endl;
+            app_log("SCAN", "create handle failed interface=%s error=%s", interface.c_str(), errbuf);
+            continue;
+        }
+
+        pcap_set_buffer_size(handle, 128 * 1024);
+        pcap_set_timeout(handle, 10);
+        pcap_set_immediate_mode(handle, 1);
+        pcap_set_promisc(handle, 1);
+        pcap_set_snaplen(handle, BUFSIZ);
+
+        if (pcap_activate(handle) != 0) {
+            std::cerr << "Could not activate scan handle for " << interface << ": " << pcap_geterr(handle) << std::endl;
+            app_log("SCAN", "activate handle failed interface=%s error=%s", interface.c_str(), pcap_geterr(handle));
+            pcap_close(handle);
+            continue;
+        }
+
+        if (pcap_datalink(handle) != 127) {
+            app_log("SCAN", "skip interface=%s unsupported datalink=%d", interface.c_str(), pcap_datalink(handle));
+            pcap_close(handle);
+            continue;
+        }
+
+        if (pcap_setnonblock(handle, 1, errbuf) != 0) {
+            app_log("SCAN", "nonblock failed interface=%s error=%s", interface.c_str(), errbuf);
+        }
+
+        scan_handles.push_back({interface, handle});
+    }
+
+    app_log("SCAN", "start interfaces=%zu channel_order=1-13", scan_handles.size());
+
+    constexpr auto channel_settle = std::chrono::milliseconds(15);
+    constexpr auto channel_dwell = std::chrono::milliseconds(70);
+    int last_matched_channel = 0;
+    for (int channel : scan_channel_order()) {
+        ChannelScanStats stats;
+        context.channel = channel;
+        context.stats = &stats;
+
+        for (const auto& scan_handle : scan_handles) {
+            set_wifi_channel(scan_handle.interface.c_str(), channel);
+        }
+
+        std::this_thread::sleep_for(channel_settle);
+        const auto deadline = std::chrono::steady_clock::now() + channel_dwell;
+        while (std::chrono::steady_clock::now() < deadline) {
+            for (const auto& scan_handle : scan_handles) {
+                int dispatched = pcap_dispatch(scan_handle.handle, 128, scan_packet_callback, reinterpret_cast<u_char*>(&context));
+                if (dispatched < 0) {
+                    app_log("SCAN", "dispatch failed channel=%d interface=%s error=%s", channel, scan_handle.interface.c_str(), pcap_geterr(scan_handle.handle));
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+
+        std::cout << "Scan channel " << channel
+                  << ": packets=" << stats.packets
+                  << " data=" << stats.data_frames
+                  << " data_macs=" << stats.data_macs.size()
+                  << " version_matches=" << stats.version_matches
+                  << " matched_macs=" << stats.matched_macs.size()
+                  << " no_rt_channel=" << stats.missing_radiotap_channel
+                  << " mismatches=" << stats.version_mismatches
+                  << std::endl;
+
+        app_log("SCAN", "channel=%d packets=%d data=%d data_macs=%zu version_matches=%d matched_macs=%zu no_rt_channel=%d mismatches=%d",
+            channel,
+            stats.packets,
+            stats.data_frames,
+            stats.data_macs.size(),
+            stats.version_matches,
+            stats.matched_macs.size(),
+            stats.missing_radiotap_channel,
+            stats.version_mismatches);
+
+        for (const auto& matched_mac : stats.matched_macs) {
+            app_log("SCAN", "channel=%d matched_mac=%s", channel, matched_mac.c_str());
+        }
+        if (!stats.matched_macs.empty()) {
+            last_matched_channel = channel;
+        }
+    }
+
+    context.stats = nullptr;
+    if (last_matched_channel != 0) {
+        last_scan_match_channel_ = last_matched_channel;
+    }
+    for (const auto& scan_handle : scan_handles) {
+        pcap_close(scan_handle.handle);
+    }
+
+    app_log("SCAN", "done matched_unique_macs=%zu selected_channel=%d", context.macs.size(), last_scan_match_channel_);
+    std::vector<DiscoveredDevice> devices;
+    for (const auto& [mac, channel] : context.device_channels) {
+        devices.push_back({mac, channel});
+        app_log("SCAN", "device mac=%s channel=%d", mac.c_str(), channel);
+    }
+    return devices;
+}
+
+void PacketSniffer::packet_handler(const struct pcap_pkthdr* pkthdr, const u_char* packet) {
+    ieee80211_radiotap_iterator radiotap_header;
+    if (ieee80211_radiotap_iterator_init(&radiotap_header, (ieee80211_radiotap_header*)packet, pkthdr->caplen) != 0) return;
+
+    const size_t wifi_offset = radiotap_header.max_length;
+    if (pkthdr->caplen < wifi_offset + WLAN_IEEE80211_HEADER_SIZE + Air2Ground_Header_Size) return;
+
+    auto* ieee_header = (IEEE80211_MacHeader*)(packet + wifi_offset);
+    if (ieee_header->fc.type != 0b10) return;
+
+    auto* header = (Air2Ground_Header*)(packet + wifi_offset + WLAN_IEEE80211_HEADER_SIZE);
+    if (header->packet_version != PACKET_VERSION || header->type != Air2Ground_Header::Type::Video) return;
+
+    const uint64_t packet_key = (static_cast<uint64_t>(header->frame_index) << 8) | header->part_index;
+    {
+        std::lock_guard<std::mutex> lock(seen_packet_mutex_);
+        if (seen_packet_keys_.size() > 8192) seen_packet_keys_.clear();
+        if (!seen_packet_keys_.insert(packet_key).second) return;
+    }
+
+    packet_pool_.add_packet(packet, pkthdr->caplen);
 }
 
 // Static callback function for pcap_loop
