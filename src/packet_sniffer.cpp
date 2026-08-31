@@ -331,10 +331,6 @@ void PacketSniffer::single_capture_thread(pcap_t* handle, int packet_count) {
 
     if (result == -1) {
         std::cerr << "Error in pcap_loop: " << pcap_geterr(handle) << std::endl;
-    } else if (result == -2) {
-        std::cout << "Capture stopped by pcap_breakloop" << std::endl;
-    } else if (result == 0 && packet_count > 0) {
-        std::cout << "Capture completed (reached packet count limit)" << std::endl;
     }
 }
 
@@ -489,10 +485,10 @@ void PacketSniffer::packet_handler(const struct pcap_pkthdr* pkthdr, const u_cha
     if (pkthdr->caplen < wifi_offset + WLAN_IEEE80211_HEADER_SIZE + Air2Ground_Header_Size) return;
 
     auto* ieee_header = (IEEE80211_MacHeader*)(packet + wifi_offset);
-    if (ieee_header->fc.type != 0b10) return;
+    if (ieee_header->fc.type != 0b10) return;//return non data pack
 
     auto* header = (Air2Ground_Header*)(packet + wifi_offset + WLAN_IEEE80211_HEADER_SIZE);
-    if (header->packet_version != PACKET_VERSION || header->type != Air2Ground_Header::Type::Video) return;
+    if (header->packet_version != PACKET_VERSION || header->type != Air2Ground_Header::Type::Video) return;//return non video pack
 
     const uint64_t packet_key = (static_cast<uint64_t>(header->frame_index) << 8) | header->part_index;
     {

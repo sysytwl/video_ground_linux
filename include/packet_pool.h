@@ -118,7 +118,7 @@ private:
     std::unordered_set<uint64_t> seen_parts_;
     
     // Timeout for stale frames (milliseconds)
-    std::chrono::milliseconds frame_timeout_{1000};
+    std::chrono::milliseconds frame_timeout_{20};
     
     void decoder_thread_func(int id);
     void process_active_frame();
@@ -137,11 +137,6 @@ public:
     // Start/stop processing with specified number of decoder threads
     void start_processing(int num_threads = 1, PacketCallback callback = nullptr);
     void stop_processing();
-
-    // Statistics
-    void get_statistics(uint64_t& total, uint64_t& received, 
-                       uint64_t& recovered, uint64_t& wasted,
-                       uint64_t& decoded, uint64_t& discarded) const;
     
     // Set frame timeout
     void set_frame_timeout(std::chrono::milliseconds timeout);

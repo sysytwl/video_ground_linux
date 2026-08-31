@@ -14,30 +14,6 @@
 uint8_t data_rate;
 int8_t dbm_antsignal;
 
-// Initialize once
-void init_logger() {
-    app_log("PACKET_POOL", "logger initialized");
-}
-
-// Log function
-void log_message(const char* format, ...) {
-    char message[512];
-    va_list args;
-    va_start(args, format);
-    vsnprintf(message, sizeof(message), format, args);
-    va_end(args);
-    size_t len = strlen(message);
-    while (len > 0 && (message[len - 1] == '\n' || message[len - 1] == '\r')) {
-        message[--len] = '\0';
-    }
-    app_log("PACKET_POOL", "%s", message);
-}
-
-// Cleanup
-void close_logger() {
-    app_log("PACKET_POOL", "logger closed");
-}
-
 // int verify_fcs(const uint8_t *frame, size_t total_len) {
 //     if (total_len < 4) return 0;  // Frame too short for FCS
     
@@ -76,7 +52,7 @@ PacketPool::PacketPool()
 PacketPool::~PacketPool() {
     stop_processing();
 }
-
+size_t total_pack_size = 0;
 bool PacketPool::add_packet(const uint8_t* data, size_t data_size) {
     std::unique_lock<std::mutex> lock(pool_mutex_);
     // return if buffer is full
@@ -84,6 +60,7 @@ bool PacketPool::add_packet(const uint8_t* data, size_t data_size) {
 
     packet_buffer_.push(std::vector<uint8_t>(data, data+data_size));
     packets_received_++;
+    total_pack_size += data_size;
 
     // Notify decoder thread
     packet_available_cv_.notify_one();
@@ -161,11 +138,10 @@ void PacketPool::process_active_frame() {
     }
     // Check if frame is stale and should be discarded
     else if (active_frame_.is_stale(frame_timeout_)) {
-       log_message("    timeout\n");
+       app_log("PACKET_POOL", "   timeout\n");
         flush_stale_frame();
     } else {
-        log_message("    false \n");
-        //printf("incomplete pack, not able to decode. \n");
+        app_log("PACKET_POOL", "incomplete pack, not able to decode. \n");
         flush_stale_frame();
     }
 }
@@ -244,7 +220,7 @@ void PacketPool::decoder_thread_func(int id) {
 
         // if(FCS){
         //     if(!verify_fcs(packet.data() + radiotap_header.max_length, packet.size() - radiotap_header.max_length)){
-        //         log_message("FCS check fail!\n");
+        //         app_log("PACKET_POOL", "FCS check fail!\n");
         //         continue;
         //     }
         // }
@@ -331,7 +307,7 @@ void PacketPool::decoder_thread_func(int id) {
         packet.clear();
 
     clock_t end = clock();
-    //log_message("Callback took: %ld us  \n ", (end-start)*1000000/CLOCKS_PER_SEC);
+    //app_log("PACKET_POOL", "Callback took: %ld us  \n ", (end-start)*1000000/CLOCKS_PER_SEC);
     }
     
     // Cleanup thread-local FEC
@@ -345,21 +321,14 @@ void PacketPool::decoder_thread_func(int id) {
 
 void PacketPool::start_processing(int num_threads, PacketCallback callback) {
     if (running_) return;
-    
+
     running_ = true;
     callback_ = callback;
     active_frame_.init(FEC_N);
-    
-    // Start decoder threads
-    for (int i = 0; i < num_threads; i++) {
-        decoding_threads_.emplace_back(&PacketPool::decoder_thread_func, this, i);
-    }
+
+    decoding_threads_.emplace_back(&PacketPool::decoder_thread_func, this, 0);
     
     start_time = time(NULL);
-
-    init_logger();
-
-    printf("Started packet processing with %d threads\n", num_threads);
 }
 
 void PacketPool::stop_processing() {
@@ -392,34 +361,20 @@ void PacketPool::stop_processing() {
         seen_parts_.clear();
     }
 
-    close_logger();
-
     // Print statistics
     double elapsed_time = difftime(time(NULL), start_time);
     printf("\n=== Packet Pool Statistics ===\n");
-    printf("Total frames decoded: %llu\n", (unsigned long long)frames_decoded_.load());
-    printf("Total frames discarded: %llu\n", (unsigned long long)frames_discarded_.load());
-    printf("Packets received: %llu\n", (unsigned long long)packets_received_.load());
+    printf("Total pack frames decoded: %llu\n", (unsigned long long)frames_decoded_.load());
+    printf("Total pack frames discarded: %llu\n", (unsigned long long)frames_discarded_.load());
     printf("Duplicate packets skipped: %llu\n", (unsigned long long)duplicate_packets_.load());
     printf("Packets recovered: %llu\n", (unsigned long long)packets_recovered_.load());
     printf("Packets wasted: %llu\n", (unsigned long long)packets_wasted_.load());
-    printf("Processing time: %.2f seconds\n", elapsed_time);
+    printf("Packets received: %llu\n", (unsigned long long)packets_received_.load());
     if (elapsed_time > 0) {
         printf("Data rate: %.2f KB/s\n", 
-               (packets_received_ * 1024.0) / (elapsed_time * 1024.0));
+               (total_pack_size) / (elapsed_time * 1024.0));
     }
     printf("==============================\n");
-}
-
-void PacketPool::get_statistics(uint64_t& total, uint64_t& received, 
-                               uint64_t& recovered, uint64_t& wasted,
-                               uint64_t& decoded, uint64_t& discarded) const {
-    total = total_packets_;
-    received = packets_received_;
-    recovered = packets_recovered_;
-    wasted = packets_wasted_;
-    decoded = frames_decoded_;
-    discarded = frames_discarded_;
 }
 
 void PacketPool::set_frame_timeout(std::chrono::milliseconds timeout) {

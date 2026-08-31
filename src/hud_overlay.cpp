@@ -1,6 +1,7 @@
 #include "hud_overlay.h"
 #include <SDL2_gfxPrimitives.h>
 #include <cmath>
+#include <cstdlib>
 #include <sstream>
 #include <algorithm>
 #include "msp.h"
@@ -79,7 +80,11 @@ void HUDOverlay::init(SDL_Renderer* renderer, TTF_Font* font){
     font_ = font;
 
     // Load the Betaflight OSD font atlas
-    SDL_Surface* surface = IMG_Load("vision.png");
+    const char* configured_path = std::getenv("VISION_PNG_PATH");
+    const char* atlas_path = configured_path && configured_path[0] != '\0'
+        ? configured_path
+        : "vision.png";
+    SDL_Surface* surface = IMG_Load(atlas_path);
     if (surface) {
         const Uint32 background_key = getSurfacePixel(surface, 0, 0);
         SDL_SetColorKey(surface, SDL_TRUE, background_key);
@@ -87,13 +92,13 @@ void HUDOverlay::init(SDL_Renderer* renderer, TTF_Font* font){
         osd_font_atlas_surf_ = surface;
         osd_font_atlas_ = SDL_CreateTextureFromSurface(renderer_, surface);
         if (!osd_font_atlas_) {
-            SDL_Log("Failed to create texture from vision.png: %s", SDL_GetError());
+            SDL_Log("Failed to create texture from %s: %s", atlas_path, SDL_GetError());
         } else {
             SDL_SetTextureBlendMode(osd_font_atlas_, SDL_BLENDMODE_BLEND);
-            SDL_Log("OSD font atlas loaded successfully.");
+            SDL_Log("OSD font atlas loaded successfully from %s.", atlas_path);
         }
     } else {
-        SDL_Log("Failed to load vision.png: %s", IMG_GetError());
+        SDL_Log("Failed to load %s: %s", atlas_path, IMG_GetError());
     }
     last_blink_time_ = SDL_GetTicks();
 }

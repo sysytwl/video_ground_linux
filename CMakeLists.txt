@@ -90,6 +90,9 @@ if(NOT Pcap_FOUND)
     endif()
 endif()
 
+# Apply optimization to this directory and all subdirectories (including custom libs).
+add_compile_options(-O3)
+
 # Subdirectories for your custom libraries
 set(SUB_DIRECTORIES
     lib/ESP32_WiFi_Injection_Sinffer
