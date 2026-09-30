@@ -318,6 +318,8 @@ void PacketSniffer::start_multi_capture(int packet_count) {
               << multi_handles_.size() << " interfaces..." << std::endl;
 
     running_ = true;
+    reorder_running_ = true;
+    reorder_thread_ = std::thread(&PacketSniffer::reorder_thread_func, this);
 
     // Start a capture thread for each interface
     for (auto handle : multi_handles_) {
@@ -352,6 +354,12 @@ void PacketSniffer::stop_multi_capture() {
     }
     capture_threads_.clear();
 
+    reorder_running_ = false;
+    reorder_cv_.notify_all();
+    if (reorder_thread_.joinable()) {
+        reorder_thread_.join();
+    }
+
     // Close all handles
     for (auto handle : multi_handles_) {
         pcap_close(handle);
@@ -364,6 +372,15 @@ void PacketSniffer::stop_multi_capture() {
     {
         std::lock_guard<std::mutex> lock(seen_packet_mutex_);
         seen_packet_keys_.clear();
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(reorder_mutex_);
+        reorder_packets_.clear();
+        timestamp_initialized_ = false;
+        latest_extended_timestamp_ = 0;
+        dispatched_timestamp_initialized_ = false;
+        last_dispatched_timestamp_ = 0;
     }
 }
 
@@ -501,10 +518,76 @@ std::vector<DiscoveredDevice> PacketSniffer::scan_devices(const std::vector<std:
 
 void PacketSniffer::packet_handler(const struct pcap_pkthdr* pkthdr, const u_char* packet) {
     ieee80211_radiotap_iterator radiotap_header;
-    if (ieee80211_radiotap_iterator_init(&radiotap_header, (ieee80211_radiotap_header*)packet, pkthdr->caplen) != 0) return;
+    if (ieee80211_radiotap_iterator_init(&radiotap_header,
+        (ieee80211_radiotap_header*)packet, pkthdr->caplen) != 0) return;
 
     const size_t wifi_offset = radiotap_header.max_length;
     if (pkthdr->caplen < wifi_offset + WLAN_IEEE80211_HEADER_SIZE + Air2Ground_Header_Size) return;
+    const uint16_t timestamp = read_le16(packet + wifi_offset + 2);
+
+    std::lock_guard<std::mutex> lock(reorder_mutex_);
+    int64_t extended_timestamp = timestamp;
+    if (timestamp_initialized_) {
+        extended_timestamp = static_cast<int64_t>(latest_extended_timestamp_ & ~uint64_t{0xffff}) | timestamp;
+        if (extended_timestamp + 0x8000 < static_cast<int64_t>(latest_extended_timestamp_)) {
+            extended_timestamp += 0x10000;
+        } else if (extended_timestamp > static_cast<int64_t>(latest_extended_timestamp_) + 0x8000) {
+            extended_timestamp -= 0x10000;
+        }
+    } else {
+        timestamp_initialized_ = true;
+    }
+    if (extended_timestamp < 0) return;
+    const uint64_t order_key = static_cast<uint64_t>(extended_timestamp);
+    latest_extended_timestamp_ = std::max(latest_extended_timestamp_, order_key);
+    if (dispatched_timestamp_initialized_ && order_key <= last_dispatched_timestamp_) {
+        timestamp_duplicates_++;
+        return;
+    }
+    auto [it, inserted] = reorder_packets_.try_emplace(order_key,
+        ReorderPacket{std::vector<uint8_t>(packet, packet + pkthdr->caplen), std::chrono::steady_clock::now()});
+    if (!inserted) {
+        timestamp_duplicates_++;
+        return;
+    }
+    reorder_cv_.notify_one();
+}
+
+void PacketSniffer::reorder_thread_func() {
+    constexpr auto reorder_window = std::chrono::milliseconds(3);
+    while (true) {
+        std::vector<uint8_t> packet;
+        {
+            std::unique_lock<std::mutex> lock(reorder_mutex_);
+            reorder_cv_.wait_for(lock, std::chrono::milliseconds(1), [this] {
+                return !reorder_running_ || !reorder_packets_.empty();
+            });
+            if (reorder_packets_.empty()) {
+                if (!reorder_running_) break;
+                continue;
+            }
+            auto first = reorder_packets_.begin();
+            if (reorder_running_ && std::chrono::steady_clock::now() - first->second.arrival < reorder_window &&
+                reorder_packets_.size() < 256) {
+                continue;
+            }
+            last_dispatched_timestamp_ = first->first;
+            dispatched_timestamp_initialized_ = true;
+            packet = std::move(first->second.data);
+            reorder_packets_.erase(first);
+        }
+        process_ordered_packet(packet);
+    }
+}
+
+void PacketSniffer::process_ordered_packet(const std::vector<uint8_t>& ordered_packet) {
+    const u_char* packet = ordered_packet.data();
+    const size_t packet_size = ordered_packet.size();
+    ieee80211_radiotap_iterator radiotap_header;
+    if (ieee80211_radiotap_iterator_init(&radiotap_header, (ieee80211_radiotap_header*)packet, packet_size) != 0) return;
+
+    const size_t wifi_offset = radiotap_header.max_length;
+    if (packet_size < wifi_offset + WLAN_IEEE80211_HEADER_SIZE + Air2Ground_Header_Size) return;
 
     auto* ieee_header = (IEEE80211_MacHeader*)(packet + wifi_offset);
     if (ieee_header->fc.type != 0b10) return;//return non data pack
@@ -513,10 +596,10 @@ void PacketSniffer::packet_handler(const struct pcap_pkthdr* pkthdr, const u_cha
     if (header->packet_version != PACKET_VERSION) return;
     if (header->type == Air2Ground_Header::Type::SerialData) {
         const size_t serial_offset = wifi_offset + WLAN_IEEE80211_HEADER_SIZE + Air2Ground_Header_Size;
-        if (pkthdr->caplen < serial_offset + sizeof(Air2Ground_Serial_Packet)) return;
+        if (packet_size < serial_offset + sizeof(Air2Ground_Serial_Packet)) return;
         auto* serial = reinterpret_cast<const Air2Ground_Serial_Packet*>(packet + serial_offset);
         const size_t payload_offset = serial_offset + sizeof(Air2Ground_Serial_Packet);
-        if (serial->payload_length > 256 || pkthdr->caplen < payload_offset + serial->payload_length) return;
+        if (serial->payload_length > 256 || packet_size < payload_offset + serial->payload_length) return;
         msp_feed_rx(packet + payload_offset, serial->payload_length);
         return;
     }
@@ -529,7 +612,7 @@ void PacketSniffer::packet_handler(const struct pcap_pkthdr* pkthdr, const u_cha
         if (!seen_packet_keys_.insert(packet_key).second) return;
     }
 
-    packet_pool_.add_packet(packet, pkthdr->caplen);
+    packet_pool_.add_packet(packet, packet_size);
 }
 
 // Static callback function for pcap_loop
