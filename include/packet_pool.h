@@ -13,9 +13,6 @@
 #include <unordered_set>
 #include "wifi_packet.h"
 
-#define FEC_K 4
-#define FEC_N 7
-
 typedef void (*PacketCallback)(const uint8_t* data, size_t size, bool vsync, uint8_t count);
 
 class PacketPool {
@@ -27,6 +24,7 @@ private:
         uint32_t frame_index=0;
         std::chrono::steady_clock::time_point creation_time;
         uint8_t n_;
+        uint8_t k_;
 
         // Check if we have enough parts for decoding
         bool can_decode() const {
@@ -34,7 +32,7 @@ private:
             for (int i = 0; i < n_; i++) {
                 if (block_status[i]) count++;
             }
-            return count >= FEC_K;
+            return count >= k_;
         }
         
         // Reset frame for reuse
@@ -59,7 +57,8 @@ private:
             return std::chrono::duration_cast<std::chrono::milliseconds>(now - creation_time);
         }
 
-        void init(int n){
+        void init(int k, int n){
+            k_ = k;
             n_ = n;
 
             block_status = new bool [n];
@@ -119,6 +118,8 @@ private:
     
     // Timeout for stale frames (milliseconds)
     std::chrono::milliseconds frame_timeout_{20};
+    uint8_t fec_k_ = 4;
+    uint8_t fec_n_ = 7;
     
     void decoder_thread_func(int id);
     void process_active_frame();
@@ -133,6 +134,7 @@ public:
     
     // Set buffer size (can be called dynamically)
     void set_buffer_size(size_t new_size);
+    bool set_fec(uint8_t k, uint8_t n);
 
     // Start/stop processing with specified number of decoder threads
     void start_processing(int num_threads = 1, PacketCallback callback = nullptr);

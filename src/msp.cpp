@@ -267,9 +267,81 @@ void msp_parse_bytes(msp_parser_t *parser, const uint8_t *data, size_t len,
 // msp.cpp 末尾追加
 
 OSDScreen g_osd_screen;   // 定义全局屏幕
+static std::mutex air_msp_parser_mutex;
+static msp_parser_t air_msp_parser;
+static std::once_flag air_msp_parser_init;
+
+void msp_feed_rx(const uint8_t* data, size_t size) {
+    std::call_once(air_msp_parser_init, [] { msp_parser_init(&air_msp_parser); });
+    std::lock_guard<std::mutex> lock(air_msp_parser_mutex);
+    msp_parse_bytes(&air_msp_parser, data, size, nullptr, nullptr);
+}
 
 static std::thread msp_thread;
 static std::atomic<bool> msp_thread_running{false};
+static std::array<std::atomic<uint16_t>, 8> msp_rc_channels = {
+    1500, 1500, 1500, 1000, 1500, 1500, 1500, 1500
+};
+static std::mutex msp_config_mutex;
+static LinkConfig msp_link_config;
+static std::atomic<uint32_t> msp_config_generation{0};
+
+void msp_set_rc_channels(const std::array<uint16_t, 8>& channels) {
+    for (size_t i = 0; i < channels.size(); ++i) {
+        msp_rc_channels[i].store(channels[i], std::memory_order_relaxed);
+    }
+}
+
+void msp_set_link_config(const LinkConfig& config) {
+    std::lock_guard<std::mutex> lock(msp_config_mutex);
+    msp_link_config = config;
+    msp_config_generation.fetch_add(1, std::memory_order_release);
+}
+
+static bool write_all(int fd, const uint8_t* data, size_t size) {
+    size_t offset = 0;
+    while (offset < size && msp_thread_running) {
+        const ssize_t written = write(fd, data + offset, size - offset);
+        if (written > 0) {
+            offset += static_cast<size_t>(written);
+            continue;
+        }
+        if (written < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return offset == size;
+}
+
+static uint8_t bridge_crc8(const uint8_t* data, size_t size) {
+    uint8_t crc = 0;
+    for (size_t i = 0; i < size; ++i) {
+        crc ^= data[i];
+        for (uint8_t bit = 0; bit < 8; ++bit) {
+            crc = (crc & 0x80) ? static_cast<uint8_t>((crc << 1) ^ 0x07) : static_cast<uint8_t>(crc << 1);
+        }
+    }
+    return crc;
+}
+
+static bool send_link_config(int fd, uint8_t transaction) {
+    LinkConfig config;
+    {
+        std::lock_guard<std::mutex> lock(msp_config_mutex);
+        config = msp_link_config;
+    }
+    std::array<uint8_t, 15> frame = {
+        'V', 'G', 'C', '1', transaction,
+        config.resolution, config.jpeg_quality, config.fec_k, config.fec_n,
+        config.wifi_channel, config.nrf_channel,
+        static_cast<uint8_t>(config.switch_delay_ms & 0xff),
+        static_cast<uint8_t>(config.switch_delay_ms >> 8),
+        0, '\n',
+    };
+    frame[13] = bridge_crc8(frame.data(), 13);
+    return write_all(fd, frame.data(), frame.size());
+}
 
 static bool msp_send_request(int fd, uint8_t cmd, const uint8_t *data, size_t len) {
     if (fd < 0) return false;
@@ -290,9 +362,8 @@ static bool msp_send_request(int fd, uint8_t cmd, const uint8_t *data, size_t le
     }
     packet.push_back(checksum);
 
-    ssize_t written = write(fd, packet.data(), packet.size());
-    if (written != static_cast<ssize_t>(packet.size())) {
-        msp_debug_log("failed to write MSP request cmd=0x%02X written=%zd expected=%zu", cmd, written, packet.size());
+    if (!write_all(fd, packet.data(), packet.size())) {
+        msp_debug_log("failed to write MSP request cmd=0x%02X size=%zu: %s", cmd, packet.size(), strerror(errno));
         return false;
     }
 
@@ -353,9 +424,35 @@ static void msp_thread_func(const char *device) {
     const uint8_t request_data[] = {0};
     size_t poll_index = 0;
     auto next_poll = std::chrono::steady_clock::now();
+    auto next_rc_send = std::chrono::steady_clock::now();
+    uint8_t config_retries = 3;
+    uint32_t sent_config_generation = 0;
+    auto next_config_send = std::chrono::steady_clock::now();
 
     while (msp_thread_running) {
         auto now = std::chrono::steady_clock::now();
+        const uint32_t current_generation = msp_config_generation.load(std::memory_order_acquire);
+        if (current_generation != sent_config_generation) {
+            sent_config_generation = current_generation;
+            config_retries = 3;
+            next_config_send = now;
+        }
+        if (config_retries > 0 && now >= next_config_send) {
+            if (send_link_config(fd, 1)) --config_retries;
+            next_config_send = now + std::chrono::milliseconds(200);
+        }
+        if (now >= next_rc_send) {
+            std::array<uint8_t, 16> rc_payload{};
+            for (size_t i = 0; i < msp_rc_channels.size(); ++i) {
+                const uint16_t value = msp_rc_channels[i].load(std::memory_order_relaxed);
+                rc_payload[i * 2] = static_cast<uint8_t>(value & 0xff);
+                rc_payload[i * 2 + 1] = static_cast<uint8_t>(value >> 8);
+            }
+            if (!msp_send_request(fd, MSP_SET_RAW_RC, rc_payload.data(), rc_payload.size())) {
+                msp_debug_log("failed to send MSP RC channels");
+            }
+            next_rc_send = now + std::chrono::milliseconds(20);
+        }
         if (now >= next_poll) {
             uint8_t cmd;
             if (msp_displayport_supported) {

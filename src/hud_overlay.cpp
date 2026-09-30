@@ -37,6 +37,48 @@ MenuItem menu_items_[] = {
         .selected = 0,
         .editable = true,
     },
+    [resolution] = {
+        .name = "Resolution",
+        .options = {"QVGA", "VGA", "SVGA", "XGA"},
+        .selected = 1,
+        .editable = true,
+    },
+    [jpeg_quality] = {
+        .name = "JPEG Quality",
+        .options = {"8", "12", "16", "20", "24", "32"},
+        .selected = 1,
+        .editable = true,
+    },
+    [fec_k] = {
+        .name = "FEC K",
+        .options = {"2", "3", "4", "5", "6", "8"},
+        .selected = 2,
+        .editable = true,
+    },
+    [fec_n] = {
+        .name = "FEC N",
+        .options = {"3", "4", "5", "6", "7", "8", "10", "12"},
+        .selected = 4,
+        .editable = true,
+    },
+    [wifi_channel] = {
+        .name = "WiFi Channel",
+        .options = {"Auto", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"},
+        .selected = 0,
+        .editable = true,
+    },
+    [nrf_channel] = {
+        .name = "nRF Channel",
+        .options = {"Auto", "0", "20", "40", "60", "80", "100", "125"},
+        .selected = 0,
+        .editable = true,
+    },
+    [apply_config] = {
+        .name = "Settings",
+        .options = {"Idle", "Apply Config"},
+        .selected = 0,
+        .editable = true,
+    },
     [start] = {
         .name = "Control",
         .options = {"Start Capture", "Stop Capture"},
@@ -324,5 +366,23 @@ bool HUDOverlay::consume_scan_request() {
     if (menu_items_[scan].options[menu_items_[scan].selected] != "Scan MACs") return false;
 
     menu_items_[scan].selected = 0;
+    return true;
+}
+
+bool HUDOverlay::consume_config_request(LinkConfig& config) {
+    std::lock_guard<std::mutex> lock(menu_mutex_);
+    if (menu_items_[apply_config].selected == 0) return false;
+    menu_items_[apply_config].selected = 0;
+
+    const std::array<uint8_t, 4> resolution_values = {5, 8, 9, 10};
+    config.resolution = resolution_values[menu_items_[resolution].selected];
+    config.jpeg_quality = static_cast<uint8_t>(std::stoi(menu_items_[jpeg_quality].options[menu_items_[jpeg_quality].selected]));
+    config.fec_k = static_cast<uint8_t>(std::stoi(menu_items_[fec_k].options[menu_items_[fec_k].selected]));
+    config.fec_n = static_cast<uint8_t>(std::stoi(menu_items_[fec_n].options[menu_items_[fec_n].selected]));
+    if (config.fec_n < config.fec_k) config.fec_n = config.fec_k;
+    const std::string& wifi = menu_items_[wifi_channel].options[menu_items_[wifi_channel].selected];
+    const std::string& nrf = menu_items_[nrf_channel].options[menu_items_[nrf_channel].selected];
+    config.wifi_channel = wifi == "Auto" ? 0 : static_cast<uint8_t>(std::stoi(wifi));
+    config.nrf_channel = nrf == "Auto" ? 255 : static_cast<uint8_t>(std::stoi(nrf));
     return true;
 }

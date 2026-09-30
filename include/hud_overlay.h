@@ -9,6 +9,7 @@
 #include <vector>
 #include <mutex>
 #include "packet_sniffer.h"
+#include "msp.h"
 
 enum DisplayMode {
     DISPLAY_NORMAL = 0,
@@ -28,6 +29,13 @@ enum hud_overlay_menu{
     interface2,
     mac,
     scan,
+    resolution,
+    jpeg_quality,
+    fec_k,
+    fec_n,
+    wifi_channel,
+    nrf_channel,
+    apply_config,
     start,
     menu_items_count
 };
@@ -60,6 +68,7 @@ public:
     DiscoveredDevice get_selected_device() const;
     bool should_start_capture() const;
     bool consume_scan_request();
+    bool consume_config_request(LinkConfig& config);
 
 private:
     SDL_Renderer* renderer_;

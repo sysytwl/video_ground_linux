@@ -4,6 +4,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <array>
 #include <mutex>
 #include <string>
 extern std::mutex g_osd_mutex;
@@ -14,6 +15,7 @@ extern std::mutex g_osd_mutex;
 #define MSP_ANALOG          110
 #define MSP_GPS             111
 #define MSP_STATUS          101
+#define MSP_SET_RAW_RC      200
 #define MSP_OSD_CONFIG      89   // 获取OSD布局配置
 // msp.h (追加内容)
 
@@ -177,9 +179,22 @@ void msp_parse_bytes(msp_parser_t *parser, const uint8_t *data, size_t len,
 // 全局OSD数据存储（可由回调更新）
 extern osd_data_t g_osd;
 
+struct LinkConfig {
+    uint8_t resolution = 8;
+    uint8_t jpeg_quality = 12;
+    uint8_t fec_k = 4;
+    uint8_t fec_n = 7;
+    uint8_t wifi_channel = 13;
+    uint8_t nrf_channel = 0;
+    uint16_t switch_delay_ms = 500;
+};
+
 // Start/stop MSP serial reader (runs background thread). Device can be overridden
 // via environment variable `MSP_DEVICE`. Returns true on success starting.
 bool msp_start();
 void msp_stop();
+void msp_set_rc_channels(const std::array<uint16_t, 8>& channels);
+void msp_set_link_config(const LinkConfig& config);
+void msp_feed_rx(const uint8_t* data, size_t size);
 
 #endif

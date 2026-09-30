@@ -78,17 +78,17 @@ void PacketPool::process_active_frame() {
         // Initialize FEC if needed
         if (fec_type == nullptr) {
             fec_decoder.init_fec();
-            fec_type = fec_decoder.fec_new(FEC_K, FEC_N);
+            fec_type = fec_decoder.fec_new(fec_k_, fec_n_);
         }
         
         // Prepare FEC decoding
-        unsigned int* block_indices = new unsigned int[FEC_K];
-        uint8_t** in_packets = new uint8_t*[FEC_K];
-        uint8_t** out_packets = new uint8_t*[FEC_K];
+        unsigned int* block_indices = new unsigned int[fec_k_];
+        uint8_t** in_packets = new uint8_t*[fec_k_];
+        uint8_t** out_packets = new uint8_t*[fec_k_];
         
-        int fec_pack_counter = FEC_K;
+        int fec_pack_counter = fec_k_;
 
-        for (int i = 0; i < FEC_K; i++) {
+        for (int i = 0; i < fec_k_; i++) {
             if (active_frame_.block_status[i]) {
                 in_packets[i] = active_frame_.block_data[i];
                 block_indices[i] = i;
@@ -115,7 +115,7 @@ void PacketPool::process_active_frame() {
         //printf("FEC latency: %d   ", active_frame_.get_elapsed_time());
 
         // Output all K packets
-        for (int i = 0; i < FEC_K; i++) {
+        for (int i = 0; i < fec_k_; i++) {
             callback_(
                 active_frame_.block_data[i] + Video_Header, 
                 active_frame_.data_size - Video_Header, 
@@ -127,7 +127,7 @@ void PacketPool::process_active_frame() {
         //printf("viedo callback latency: %d \n", active_frame_.get_elapsed_time());
         
         frames_decoded_++;
-        total_packets_ += FEC_K;
+        total_packets_ += fec_k_;
         seen_parts_.clear();
         
         // Clean up
@@ -149,7 +149,7 @@ void PacketPool::process_active_frame() {
 void PacketPool::flush_stale_frame() {
     // Output any available packets before discarding
     int available_packets = 0;
-    for (int i = 0; i < FEC_K; i++) {
+    for (int i = 0; i < fec_k_; i++) {
         if (active_frame_.block_status[i]) {
             callback_(
                 active_frame_.block_data[i]+ Video_Header,
@@ -171,7 +171,7 @@ void PacketPool::decoder_thread_func(int id) {
     
     // Thread-local FEC initialization
     fec_decoder.init_fec();
-    fec_type = fec_decoder.fec_new(FEC_K, FEC_N);
+    fec_type = fec_decoder.fec_new(fec_k_, fec_n_);
     
     //packet
     std::vector<uint8_t>  packet;
@@ -276,7 +276,7 @@ void PacketPool::decoder_thread_func(int id) {
             }
 
             // Validate packet
-            if (part_index >= FEC_N) {
+            if (part_index >= fec_n_) {
                 packets_wasted_++;
                 printf("Invalid part index: %d\n", part_index);
                 continue;
@@ -324,7 +324,7 @@ void PacketPool::start_processing(int num_threads, PacketCallback callback) {
 
     running_ = true;
     callback_ = callback;
-    active_frame_.init(FEC_N);
+    active_frame_.init(fec_k_, fec_n_);
 
     decoding_threads_.emplace_back(&PacketPool::decoder_thread_func, this, 0);
     
@@ -379,4 +379,11 @@ void PacketPool::stop_processing() {
 
 void PacketPool::set_frame_timeout(std::chrono::milliseconds timeout) {
     frame_timeout_ = timeout;
+}
+
+bool PacketPool::set_fec(uint8_t k, uint8_t n) {
+    if (running_ || k == 0 || n < k || n > 32) return false;
+    fec_k_ = k;
+    fec_n_ = n;
+    return true;
 }

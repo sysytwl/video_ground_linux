@@ -19,9 +19,11 @@
 #include "msp.h"
 #include "turbojpeg.h"
 #include "video_decoder.h"
+#include "gamepad.h"
 
 extern std::atomic<bool> g_running;
 extern HUDOverlay hud;
+extern GamepadHandler gamepad;
 
 struct ImageBuffer {
     std::vector<uint8_t> buffer;
@@ -332,6 +334,9 @@ void decoder_thread() {
                 }
             }
         }
+
+        gamepad.update();
+        msp_set_rc_channels(gamepad.read_rc_channels());
 
         auto now = std::chrono::steady_clock::now();
         if (now - last_refresh >= refresh_interval) {

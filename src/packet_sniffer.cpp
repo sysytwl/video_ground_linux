@@ -7,11 +7,13 @@
 #include <algorithm>
 #include <chrono>
 #include <iomanip>
+#include <limits>
 #include <map>
 #include <set>
 #include <thread>
 
 #include "app_log.h"
+#include "msp.h"
 #include "wifi_inj_sin.h"
 
 namespace {
@@ -365,6 +367,19 @@ void PacketSniffer::stop_multi_capture() {
     }
 }
 
+bool PacketSniffer::set_fec(uint8_t k, uint8_t n) {
+    return packet_pool_.set_fec(k, n);
+}
+
+int PacketSniffer::recommended_wifi_channel() const {
+    return recommended_wifi_channel_;
+}
+
+int PacketSniffer::recommended_nrf_channel() const {
+    const int wifi_center_mhz = 2407 + recommended_wifi_channel_ * 5;
+    return std::abs(2525 - wifi_center_mhz) > std::abs(wifi_center_mhz - 2400) ? 125 : 0;
+}
+
 std::vector<DiscoveredDevice> PacketSniffer::scan_devices(const std::vector<std::string>& interfaces) {
     ScanContext context;
     char errbuf[PCAP_ERRBUF_SIZE];
@@ -411,6 +426,8 @@ std::vector<DiscoveredDevice> PacketSniffer::scan_devices(const std::vector<std:
     constexpr auto channel_settle = std::chrono::milliseconds(15);
     constexpr auto channel_dwell = std::chrono::milliseconds(70);
     int last_matched_channel = 0;
+    int lowest_traffic_channel = DEFAULT_WIFI_CHANNEL;
+    int lowest_packet_count = std::numeric_limits<int>::max();
     for (int channel : scan_channel_order()) {
         ChannelScanStats stats;
         context.channel = channel;
@@ -458,12 +475,17 @@ std::vector<DiscoveredDevice> PacketSniffer::scan_devices(const std::vector<std:
         if (!stats.matched_macs.empty()) {
             last_matched_channel = channel;
         }
+        if (stats.packets < lowest_packet_count) {
+            lowest_packet_count = stats.packets;
+            lowest_traffic_channel = channel;
+        }
     }
 
     context.stats = nullptr;
     if (last_matched_channel != 0) {
         last_scan_match_channel_ = last_matched_channel;
     }
+    recommended_wifi_channel_ = lowest_traffic_channel;
     for (const auto& scan_handle : scan_handles) {
         pcap_close(scan_handle.handle);
     }
@@ -488,7 +510,17 @@ void PacketSniffer::packet_handler(const struct pcap_pkthdr* pkthdr, const u_cha
     if (ieee_header->fc.type != 0b10) return;//return non data pack
 
     auto* header = (Air2Ground_Header*)(packet + wifi_offset + WLAN_IEEE80211_HEADER_SIZE);
-    if (header->packet_version != PACKET_VERSION || header->type != Air2Ground_Header::Type::Video) return;//return non video pack
+    if (header->packet_version != PACKET_VERSION) return;
+    if (header->type == Air2Ground_Header::Type::SerialData) {
+        const size_t serial_offset = wifi_offset + WLAN_IEEE80211_HEADER_SIZE + Air2Ground_Header_Size;
+        if (pkthdr->caplen < serial_offset + sizeof(Air2Ground_Serial_Packet)) return;
+        auto* serial = reinterpret_cast<const Air2Ground_Serial_Packet*>(packet + serial_offset);
+        const size_t payload_offset = serial_offset + sizeof(Air2Ground_Serial_Packet);
+        if (serial->payload_length > 256 || pkthdr->caplen < payload_offset + serial->payload_length) return;
+        msp_feed_rx(packet + payload_offset, serial->payload_length);
+        return;
+    }
+    if (header->type != Air2Ground_Header::Type::Video) return;
 
     const uint64_t packet_key = (static_cast<uint64_t>(header->frame_index) << 8) | header->part_index;
     {

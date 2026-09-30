@@ -35,6 +35,7 @@ private:
     std::vector<std::thread> capture_threads_;
     std::vector<std::string> interfaces_;
     int last_scan_match_channel_;
+    int recommended_wifi_channel_ = 13;
     std::mutex seen_packet_mutex_;
     std::unordered_set<uint64_t> seen_packet_keys_;
 
@@ -56,6 +57,9 @@ public:
                          int channel);
     void start_multi_capture(int packet_count = 0);
     void stop_multi_capture();
+    bool set_fec(uint8_t k, uint8_t n);
+    int recommended_wifi_channel() const;
+    int recommended_nrf_channel() const;
     std::vector<DiscoveredDevice> scan_devices(const std::vector<std::string>& interfaces);
 };
 
