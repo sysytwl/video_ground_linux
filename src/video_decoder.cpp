@@ -14,6 +14,10 @@
 #include <string>
 #include <thread>
 #include <cmath>  // for M_PI
+#include <ctime>
+#include <filesystem>
+#include <opencv2/core.hpp>
+#include <opencv2/videoio.hpp>
 #include "hud_overlay.h"
 #include "object_detector.h"
 #include "msp.h"
@@ -59,6 +63,51 @@ std::deque<std::chrono::steady_clock::time_point> frame_timestamps_;
 static constexpr int FPS_WINDOW = 30;
 static constexpr int SCREEN_REFRESH_MS = 16; // ~60Hz
 float current_fps_ = 0.0f;
+cv::VideoWriter video_writer_;
+bool recording_ = false;
+std::filesystem::path recording_path_;
+
+std::filesystem::path make_recording_path() {
+    const char* home = std::getenv("HOME");
+    std::filesystem::path directory = home ? std::filesystem::path(home) / "Videos" : std::filesystem::current_path();
+    std::error_code error;
+    std::filesystem::create_directories(directory, error);
+    if (error) directory = std::filesystem::current_path();
+
+    const std::time_t now = std::time(nullptr);
+    std::tm local_time{};
+    localtime_r(&now, &local_time);
+    char filename[64];
+    std::strftime(filename, sizeof(filename), "wifi-video-%Y%m%d-%H%M%S.avi", &local_time);
+    return directory / filename;
+}
+
+void stop_recording() {
+    if (!recording_) return;
+    video_writer_.release();
+    recording_ = false;
+    std::cout << "Recording saved to " << recording_path_ << std::endl;
+}
+
+void toggle_recording(int width, int height) {
+    if (recording_) {
+        stop_recording();
+        return;
+    }
+    if (width <= 0 || height <= 0) {
+        std::cerr << "Cannot record before the first video frame" << std::endl;
+        return;
+    }
+
+    recording_path_ = make_recording_path();
+    const double fps = current_fps_ > 1.0f ? current_fps_ : 30.0;
+    if (!video_writer_.open(recording_path_.string(), cv::VideoWriter::fourcc('M', 'J', 'P', 'G'), fps, cv::Size(width, height))) {
+        std::cerr << "Failed to start recording at " << recording_path_ << std::endl;
+        return;
+    }
+    recording_ = true;
+    std::cout << "Recording started: " << recording_path_ << std::endl;
+}
 
 //===================img resize=========================
 void render_fps(float fps) {
@@ -73,6 +122,18 @@ void render_fps(float fps) {
         SDL_DestroyTexture(tex);
         SDL_FreeSurface(surf);
     }
+}
+
+void render_recording_status() {
+    if (!recording_ || !font_) return;
+    SDL_Color color = {255, 48, 48, 255};
+    SDL_Surface* surface = TTF_RenderText_Solid(font_, "REC", color);
+    if (!surface) return;
+    SDL_Texture* texture = SDL_CreateTextureFromSurface(renderer_, surface);
+    SDL_Rect destination = {screen_width_ - surface->w - 20, 10, surface->w, surface->h};
+    SDL_RenderCopy(renderer_, texture, nullptr, &destination);
+    SDL_DestroyTexture(texture);
+    SDL_FreeSurface(surface);
 }
 
 void update_frame_texture(const std::vector<uint8_t>& frame_rgb, int width, int height) {
@@ -162,6 +223,7 @@ void render_frame_to_target(int width, int height) {
     }
 
     render_fps(current_fps_);
+    render_recording_status();
 
     hud.draw(screen_width_, screen_height_);
 
@@ -329,6 +391,9 @@ void decoder_thread() {
                     case SDLK_RIGHT:
                         hud.navigate_right();
                         break;
+                    case SDLK_r:
+                        toggle_recording(last_width_, last_height_);
+                        break;
                     default:
                         break;
                 }
@@ -353,6 +418,12 @@ void decoder_thread() {
             if (frame_to_upload) {
                 update_frame_texture(frame_to_upload->rgb, frame_to_upload->width, frame_to_upload->height);
                 update_fps(frame_to_upload->timestamp);
+                if (recording_) {
+                    cv::Mat rgb_frame(frame_to_upload->height, frame_to_upload->width, CV_8UC3, frame_to_upload->rgb.data());
+                    cv::Mat bgr_frame;
+                    cv::cvtColor(rgb_frame, bgr_frame, cv::COLOR_RGB2BGR);
+                    video_writer_.write(bgr_frame);
+                }
             }
             render_frame_to_target(last_width_, last_height_);
         } else {
@@ -361,6 +432,7 @@ void decoder_thread() {
     }
 
     if (assembler.joinable()) assembler.join();
+    stop_recording();
 
     if (font) TTF_CloseFont(font);
     if (output_texture_) {

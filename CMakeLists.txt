@@ -8,8 +8,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(Threads REQUIRED)
 find_package(PkgConfig REQUIRED)
 
-# OpenCV (core, imgproc, dnn)
-find_package(OpenCV REQUIRED COMPONENTS core imgproc dnn)
+# OpenCV (core, imgproc, dnn, video recording)
+find_package(OpenCV REQUIRED COMPONENTS core imgproc dnn videoio)
 include_directories(${OpenCV_INCLUDE_DIRS})
 
 # SDL2 and its extensions
