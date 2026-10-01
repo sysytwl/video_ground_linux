@@ -42,3 +42,9 @@ chmod +x package-appimage.sh
 The output is `WiFiVideoReceiver-x86_64.AppImage`. Packet capture still requires the
 host to grant the application sufficient network capabilities or run it with the
 required privileges.
+
+On systems where FUSE mounting is unavailable, launch it in extraction mode:
+
+```bash
+./run-appimage.sh
+```
